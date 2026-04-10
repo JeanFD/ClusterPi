@@ -3,7 +3,7 @@ import os, socket
 NODES = [f"192.168.1.{i}" for i in range(20, 26)]
 
 def my_ip() -> str:
-    s = socket.socket(socket.AF_INET, socket.DGRAM_)
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
     try:
         s.connect(("8.8.8.8", 80))
         return s.getsockname()[0]
