@@ -1,0 +1,15 @@
+version: "3.9"
+services:
+  redis:
+    image: redis:7-alpine
+    restart: always
+    network_mode: host
+    command: redis-server /etc/redis/redis.conf
+    volumes:
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
+      - /data/redis:/data/redis
+    healthcheck:
+      test: ["CMD", "redis-cli", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
