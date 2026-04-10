@@ -47,6 +47,15 @@ class ClusterState(SyncObj):
         }
     
 def main():
+    import threading
+    from recovery import run as recovery_run
+
+    th = threading.Thread(
+        target=recovery_run,
+        args=(state._isLeader,),  # passa o método como callback
+        daemon=True,
+    )
+    th.start()
     log.info(f"[{MY_NAME}] iniciando Raft em {MY_IP}:{RAFT_PORT}")
     state = ClusterState()
 
