@@ -5,6 +5,7 @@ assim evitamos múltiplos recoveries simultâneos competindo.
 """
 import time, logging
 import redis
+from redis.cluster import RedisCluster
 from config import (
     MY_IP, MY_NAME, REDIS_PORT,
     STREAM_TASKS, GROUP_NAME, PENDING_TIMEOUT_MS, NODES,
@@ -20,7 +21,8 @@ def run(is_leader_fn, stop_fn=lambda: False):
     is_leader_fn: callable que retorna True se este nó é o líder Raft.
     stop_fn:     callable que retorna True para encerrar o loop.
     """
-    r = redis.Redis(host=MY_IP, port=REDIS_PORT, decode_responses=True)
+    # Configuração direta para o Redis-py versão 5+
+    r = RedisCluster(host=MY_IP, port=6379, decode_responses=True)
     consumer_id = f"recovery-{MY_NAME}"
     cursor = "0-0"
 

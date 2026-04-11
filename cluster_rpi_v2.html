@@ -1,0 +1,1636 @@
+<!DOCTYPE html>
+<html lang="pt-br">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Cluster RPi v2 — Renderização 3D Distribuída</title>
+<style>
+:root{
+  --bg:#0f1117; --bg2:#161b27; --bg3:#1e2535; --border:#2a3248;
+  --text:#e2e8f0; --muted:#7a8ba8;
+  --blue:#4f8ef7; --blue-bg:#0d1f3c;
+  --green:#34d399; --green-bg:#052e1f;
+  --amber:#fbbf24; --amber-bg:#271c03;
+  --red:#f87171; --red-bg:#2d0e0e;
+  --purple:#a78bfa; --purple-bg:#1e1435;
+  --teal:#2dd4bf;
+  --mono:'JetBrains Mono','Courier New','Consolas',monospace;
+}
+*{box-sizing:border-box;margin:0;padding:0}
+body{background:var(--bg);color:var(--text);font-family:system-ui,-apple-system,sans-serif;font-size:13px;line-height:1.6}
+.shell{display:flex;min-height:100vh}
+
+/* Sidebar */
+.sidebar{width:240px;flex-shrink:0;background:var(--bg2);border-right:1px solid var(--border);padding:1.25rem 0;position:sticky;top:0;height:100vh;overflow-y:auto}
+.sidebar::-webkit-scrollbar{width:4px}
+.sidebar::-webkit-scrollbar-thumb{background:var(--border);border-radius:2px}
+.sb-logo{padding:0 16px 1.25rem;border-bottom:1px solid var(--border);margin-bottom:.75rem}
+.sb-logo .title{font-size:12px;font-weight:700;color:var(--blue);letter-spacing:.05em;text-transform:uppercase}
+.sb-logo .sub{font-size:11px;color:var(--muted);margin-top:2px}
+.sb-section{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--muted);padding:8px 16px 4px}
+.sb-item{display:flex;align-items:center;gap:8px;padding:6px 16px;cursor:pointer;font-size:12px;color:var(--muted);border:none;background:none;width:100%;text-align:left;font-family:inherit;transition:all .15s;border-left:2px solid transparent}
+.sb-item:hover{color:var(--text);background:var(--bg3)}
+.sb-item.active{color:var(--blue);background:var(--blue-bg);border-left-color:var(--blue)}
+.sb-item.done .sb-num{background:var(--green-bg);color:var(--green);border-color:var(--green)}
+.sb-num{width:22px;height:22px;border-radius:50%;border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:10px;font-weight:700;flex-shrink:0;color:var(--muted)}
+.sb-item.active .sb-num{background:var(--blue-bg);color:var(--blue);border-color:var(--blue)}
+.prog-wrap{padding:12px 16px 0}
+.prog-label{font-size:10px;color:var(--muted);margin-bottom:5px;display:flex;justify-content:space-between}
+.prog-track{height:3px;background:var(--border);border-radius:2px;overflow:hidden}
+.prog-fill{height:100%;background:var(--green);border-radius:2px;transition:width .4s}
+
+/* Main */
+.main{flex:1;padding:2rem 2.5rem;max-width:920px}
+.page{display:none}.page.active{display:block}
+
+/* Step header */
+.step-header{margin-bottom:1.5rem}
+.step-tag{font-size:11px;font-weight:700;text-transform:uppercase;letter-spacing:.08em;color:var(--blue);margin-bottom:6px}
+.step-title{font-size:24px;font-weight:700;color:var(--text);line-height:1.25;margin-bottom:8px}
+.step-desc{font-size:13.5px;color:var(--muted);line-height:1.7;max-width:700px}
+
+/* Substeps */
+.substep{margin-bottom:1.75rem}
+.substep-head{display:flex;align-items:flex-start;gap:12px;margin-bottom:10px}
+.substep-num{width:28px;height:28px;border-radius:50%;background:var(--bg3);border:1px solid var(--border);display:flex;align-items:center;justify-content:center;font-size:11px;font-weight:700;color:var(--muted);flex-shrink:0}
+.substep-info h3{font-size:14.5px;font-weight:600;color:var(--text);margin-bottom:2px}
+.substep-info p{font-size:12px;color:var(--muted);line-height:1.6;margin-bottom:0}
+
+/* "Por que isso?" — bloco didático */
+.why{background:linear-gradient(180deg,var(--purple-bg),transparent);border-left:3px solid var(--purple);border-radius:0 8px 8px 0;padding:12px 16px;margin:12px 0;font-size:12.5px;line-height:1.7;color:#cbb8f5}
+.why strong{color:var(--purple);text-transform:uppercase;font-size:10px;letter-spacing:.08em;display:block;margin-bottom:4px}
+
+/* Code */
+pre{background:#0a0d14;border:1px solid var(--border);border-radius:8px;padding:14px 16px;font-size:11.5px;font-family:var(--mono);overflow-x:auto;line-height:1.7;color:#cdd6f4;white-space:pre;position:relative;margin:8px 0 12px}
+.code-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--muted);margin:14px 0 4px;display:flex;align-items:center;gap:6px}
+.code-label .lang{padding:1px 6px;background:var(--bg3);border:1px solid var(--border);border-radius:3px;color:var(--blue)}
+
+/* Callouts */
+.callout{border-radius:6px;padding:10px 14px;font-size:12.5px;line-height:1.65;margin:10px 0;display:flex;gap:10px}
+.callout-icon{flex-shrink:0;font-size:14px;margin-top:1px}
+.callout.info{background:var(--blue-bg);border:1px solid #1a3a6b;color:#93c5fd}
+.callout.warn{background:var(--amber-bg);border:1px solid #4a3200;color:#fcd34d}
+.callout.danger{background:var(--red-bg);border:1px solid #5b1a1a;color:#fca5a5}
+.callout.ok{background:var(--green-bg);border:1px solid #084d30;color:#6ee7b7}
+.callout.purple{background:var(--purple-bg);border:1px solid #3b2a6b;color:#c4b5fd}
+
+table{width:100%;border-collapse:collapse;font-size:12px;margin:10px 0}
+th{background:var(--bg3);color:var(--muted);font-weight:600;font-size:11px;text-transform:uppercase;letter-spacing:.04em;padding:8px 12px;text-align:left}
+td{padding:9px 12px;border-top:1px solid var(--border);color:var(--muted);vertical-align:top}
+td:first-child{color:var(--text);font-weight:500}
+
+.file-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;overflow:hidden;margin:10px 0}
+.file-card-head{background:var(--bg3);padding:8px 14px;font-size:11px;font-weight:700;color:var(--muted);display:flex;align-items:center;gap:6px;border-bottom:1px solid var(--border)}
+.file-card-head .dot{width:6px;height:6px;border-radius:50%;background:var(--green)}
+.file-card-head .path{color:var(--blue);font-family:var(--mono)}
+.file-card pre{margin:0;border:none;border-radius:0;background:transparent}
+
+.verify{background:var(--green-bg);border:1px solid #084d30;border-radius:8px;padding:12px 14px;margin:10px 0}
+.verify-label{font-size:10px;font-weight:700;text-transform:uppercase;letter-spacing:.06em;color:var(--green);margin-bottom:6px}
+.verify pre{background:#021a0f;border-color:#0a4025;margin:0;color:#6ee7b7}
+
+.mark-done{display:inline-flex;align-items:center;gap:6px;margin-top:1.5rem;padding:9px 18px;border-radius:6px;border:1px solid var(--border);background:var(--bg3);color:var(--muted);font-size:13px;cursor:pointer;font-family:inherit;transition:all .2s}
+.mark-done:hover{border-color:var(--green);color:var(--green);background:var(--green-bg)}
+.mark-done.done{border-color:var(--green);color:var(--green);background:var(--green-bg);cursor:default}
+
+.page-nav{display:flex;justify-content:space-between;align-items:center;margin-top:2rem;padding-top:1.25rem;border-top:1px solid var(--border)}
+.nav-btn{padding:9px 20px;border-radius:6px;border:1px solid var(--border);background:var(--bg3);color:var(--text);font-size:13px;cursor:pointer;font-family:inherit;transition:all .15s}
+.nav-btn:hover{border-color:var(--blue);color:var(--blue)}
+.nav-btn:disabled{opacity:.3;cursor:default}
+.nav-btn.primary{background:var(--blue-bg);border-color:var(--blue);color:var(--blue)}
+.nav-btn.primary:hover{background:var(--blue);color:#fff}
+
+.node-grid{display:grid;grid-template-columns:repeat(3,1fr);gap:8px;margin:10px 0}
+.node-card{background:var(--bg2);border:1px solid var(--border);border-radius:8px;padding:10px 12px}
+.node-card.master{border-color:var(--blue);background:var(--blue-bg)}
+.node-name{font-size:12px;font-weight:700;color:var(--text);margin-bottom:3px}
+.node-card.master .node-name{color:var(--blue)}
+.node-ip{font-size:11px;font-family:var(--mono);color:var(--muted)}
+.node-hw{font-size:10px;color:var(--muted);margin-top:3px}
+
+.tag{display:inline-block;padding:2px 8px;border-radius:20px;font-size:11px;font-weight:600;margin:0 2px}
+.tag.blue{background:var(--blue-bg);color:var(--blue);border:1px solid #1a3a6b}
+.tag.green{background:var(--green-bg);color:var(--green);border:1px solid #084d30}
+.tag.amber{background:var(--amber-bg);color:var(--amber);border:1px solid #4a3200}
+.tag.purple{background:var(--purple-bg);color:var(--purple);border:1px solid #3b2a6b}
+
+.done-banner{background:var(--green-bg);border:1px solid #084d30;border-radius:8px;padding:10px 14px;margin-bottom:1.25rem;font-size:12px;color:#6ee7b7;display:flex;gap:10px;align-items:center}
+</style>
+</head>
+<body>
+<div class="shell">
+
+<!-- SIDEBAR -->
+<nav class="sidebar">
+  <div class="sb-logo">
+    <div class="title">Cluster RPi v2</div>
+    <div class="sub">6 nós · Raft · Render 3D</div>
+  </div>
+  <div class="prog-wrap">
+    <div class="prog-label"><span>Progresso</span><span id="prog-pct">44%</span></div>
+    <div class="prog-track"><div class="prog-fill" id="prog-fill" style="width:44%"></div></div>
+  </div>
+  <div style="height:12px"></div>
+
+  <div class="sb-section">Infraestrutura (feito)</div>
+  <button class="sb-item done" id="nav-0" onclick="go(0)"><span class="sb-num">1</span>Hardware e topologia</button>
+  <button class="sb-item done" id="nav-1" onclick="go(1)"><span class="sb-num">2</span>SO + SSH sem senha</button>
+  <button class="sb-item done" id="nav-2" onclick="go(2)"><span class="sb-num">3</span>Rede e relógio</button>
+  <button class="sb-item done" id="nav-3" onclick="go(3)"><span class="sb-num">4</span>Docker em paralelo</button>
+  <button class="sb-item done" id="nav-4" onclick="go(4)"><span class="sb-num">5</span>Firewall + Redis pull</button>
+  <button class="sb-item done" id="nav-5" onclick="go(5)"><span class="sb-num">6</span>Deploy Redis</button>
+  <button class="sb-item done" id="nav-6" onclick="go(6)"><span class="sb-num">7</span>Init Redis Cluster 6×0</button>
+
+  <div class="sb-section">Camada de aplicação</div>
+  <button class="sb-item active" id="nav-7" onclick="go(7)"><span class="sb-num">8</span>Estrutura Python</button>
+  <button class="sb-item" id="nav-8" onclick="go(8)"><span class="sb-num">9</span>Raft (pysyncobj)</button>
+  <button class="sb-item" id="nav-9" onclick="go(9)"><span class="sb-num">10</span>Worker de render</button>
+  <button class="sb-item" id="nav-10" onclick="go(10)"><span class="sb-num">11</span>Cálculo do Torus 3D</button>
+  <button class="sb-item" id="nav-11" onclick="go(11)"><span class="sb-num">12</span>Recovery de tarefas</button>
+  <button class="sb-item" id="nav-12" onclick="go(12)"><span class="sb-num">13</span>API HTTP (FastAPI)</button>
+
+  <div class="sb-section">Operação</div>
+  <button class="sb-item" id="nav-13" onclick="go(13)"><span class="sb-num">14</span>Frontend Three.js</button>
+  <button class="sb-item" id="nav-14" onclick="go(14)"><span class="sb-num">15</span>Deploy (systemd)</button>
+  <button class="sb-item" id="nav-15" onclick="go(15)"><span class="sb-num">16</span>Watchdog + ops</button>
+</nav>
+
+<main class="main">
+
+<!-- ════════════ 0 — Hardware ════════════ -->
+<div class="page active" id="p0">
+  <div class="done-banner">✓ Etapa concluída — registrado para referência futura</div>
+  <div class="step-header">
+    <div class="step-tag">Passo 1 · Infraestrutura</div>
+    <div class="step-title">Hardware e topologia do cluster</div>
+    <div class="step-desc">6 Raspberry Pi conectados a 2 switches Gigabit, ambos pendurados num roteador TP-Link Archer C5 que serve apenas como gateway/DHCP. Wi-Fi e UPnP desligados para o tráfego cabeado ter prioridade absoluta.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Mapa dos 6 nós</h3><p>IPs reservados via IP-MAC binding no Archer C5</p></div></div>
+    <div class="node-grid">
+      <div class="node-card master"><div class="node-name">rpi-01</div><div class="node-ip">192.168.1.20</div><div class="node-hw">Líder inicial Raft</div></div>
+      <div class="node-card"><div class="node-name">rpi-02</div><div class="node-ip">192.168.1.21</div><div class="node-hw">Worker</div></div>
+      <div class="node-card"><div class="node-name">rpi-03</div><div class="node-ip">192.168.1.22</div><div class="node-hw">Worker</div></div>
+      <div class="node-card"><div class="node-name">rpi-04</div><div class="node-ip">192.168.1.23</div><div class="node-hw">Worker</div></div>
+      <div class="node-card"><div class="node-name">rpi-05</div><div class="node-ip">192.168.1.24</div><div class="node-hw">Worker</div></div>
+      <div class="node-card"><div class="node-name">rpi-06</div><div class="node-ip">192.168.1.25</div><div class="node-hw">Worker</div></div>
+    </div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>Configuração do Archer C5</h3></div></div>
+    <table>
+      <tr><th>Parâmetro</th><th>Valor</th><th>Por quê</th></tr>
+      <tr><td>Gateway</td><td>192.168.1.1</td><td>Padrão da LAN</td></tr>
+      <tr><td>DHCP pool</td><td>.100 → .250</td><td>Deixa .20–.27 fora do pool</td></tr>
+      <tr><td>IP-MAC binding</td><td>.20 → .25</td><td>IPs imutáveis mesmo se nmcli falhar</td></tr>
+      <tr><td>Wi-Fi 2.4 / 5</td><td>desativado</td><td>Reduz interferência e CPU do roteador</td></tr>
+      <tr><td>UPnP</td><td>desativado</td><td>Sem brechas de firewall automáticas</td></tr>
+    </table>
+    <div class="why"><strong>Por que 2 switches?</strong> Distribuir os 6 RPis em 2 switches Gigabit cabeados ao roteador evita gargalos do uplink interno e permite escalar até 16 nós sem trocar hardware. O roteador NÃO está no caminho dos pacotes inter-nó — ele só responde DHCP no boot.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">C</div><div class="substep-info"><h3>Objetivo do projeto</h3></div></div>
+    <p style="color:var(--muted);font-size:12.5px;line-height:1.7">
+    <strong style="color:var(--text)">Renderização 3D distribuída e Stereo Vision.</strong> Um líder eleito por Raft gera tarefas (slices de um torus paramétrico ou pares estéreo) e empurra para uma stream Redis. Os 6 nós consomem em paralelo via consumer group e devolvem pontos 3D que são desenhados em tempo real num frontend Three.js.
+    </p>
+  </div>
+
+  <div class="page-nav">
+    <button class="nav-btn" disabled>← anterior</button>
+    <button class="nav-btn primary" onclick="go(1)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 1 — SO + SSH ════════════ -->
+<div class="page" id="p1">
+  <div class="done-banner">✓ Etapa concluída</div>
+  <div class="step-header">
+    <div class="step-tag">Passo 2 · Infraestrutura</div>
+    <div class="step-title">Sistema operacional e SSH sem senha</div>
+    <div class="step-desc">Raspberry Pi OS Lite 64-bit (Bookworm) em todos. Hostname único por SD card já configurado pelo Imager. Chave pública do laptop distribuída para os 6 nós.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Gerar e distribuir chave SSH (PowerShell)</h3></div></div>
+    <div class="code-label"><span class="lang">PowerShell</span> no laptop</div>
+<pre># 1. Criar par de chaves (uma vez)
+ssh-keygen -t ed25519 -C "cluster-rpi"   # Enter, Enter, Enter
+
+# 2. Distribuir a pública para os 6 nós
+$IPS = 20..25
+foreach ($n in $IPS) {
+    $ip = "192.168.1.$n"
+    Write-Host "Enviando chave para $ip..." -ForegroundColor Cyan
+    Get-Content "$env:USERPROFILE\.ssh\id_ed25519.pub" |
+        ssh pi@$ip "mkdir -p ~/.ssh && cat &gt;&gt; ~/.ssh/authorized_keys && chmod 600 ~/.ssh/authorized_keys"
+}</pre>
+    <div class="why"><strong>Por que ed25519?</strong> Chaves menores, mais rápidas que RSA-4096 e suportadas nativamente em qualquer OpenSSH ≥ 6.5. Em ARM, gera e verifica em milissegundos.</div>
+  </div>
+
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(0)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(2)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 2 — Rede ════════════ -->
+<div class="page" id="p2">
+  <div class="done-banner">✓ Etapa concluída</div>
+  <div class="step-header">
+    <div class="step-tag">Passo 3 · Infraestrutura</div>
+    <div class="step-title">IPs estáticos, /etc/hosts e relógio</div>
+    <div class="step-desc">Mesmo com IP-MAC binding no roteador, é boa prática fixar o IP no próprio nó com nmcli — assim o nó funciona se o roteador morrer.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>IP estático (rodar em cada RPi via SSH)</h3></div></div>
+    <div class="code-label"><span class="lang">bash</span> dentro do RPi — alterar MY_IP</div>
+<pre>MY_IP="192.168.1.20"
+GATEWAY="192.168.1.1"
+
+# Detecta automaticamente o nome da conexão ativa
+CON=$(nmcli -t -f NAME connection show --active | grep -v '^lo$' | head -n1)
+
+sudo nmcli con mod "$CON" \
+  ipv4.addresses "${MY_IP}/24" \
+  ipv4.gateway "$GATEWAY" \
+  ipv4.dns "1.1.1.1 8.8.8.8" \
+  ipv4.method manual \
+  connection.autoconnect yes
+
+sudo nmcli con up "$CON"</pre>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>Distribuir /etc/hosts (PowerShell)</h3></div></div>
+    <div class="code-label"><span class="lang">arquivo</span> cluster_hosts.txt (no laptop)</div>
+<pre>192.168.1.20 rpi-01
+192.168.1.21 rpi-02
+192.168.1.22 rpi-03
+192.168.1.23 rpi-04
+192.168.1.24 rpi-05
+192.168.1.25 rpi-06</pre>
+    <div class="code-label"><span class="lang">PowerShell</span></div>
+<pre>$IPS = 20..25
+foreach ($n in $IPS) {
+    Write-Host "Atualizando hosts em 192.168.1.$n..." -ForegroundColor Cyan
+    Get-Content "cluster_hosts.txt" |
+        ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="02726b42333b302c33343a2c33">[email&#160;protected]</a>.$n "sudo tee -a /etc/hosts &gt; /dev/null"
+}
+
+# Teste
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="bdcdd4fd8c848f938c8b85938c938f8d">[email&#160;protected]</a> "ping -c 2 rpi-06"</pre>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">C</div><div class="substep-info"><h3>Sincronia de relógio offline</h3><p>Força o horário do laptop em todos os nós</p></div></div>
+<pre>$NOW = Get-Date -Format "yyyy-MM-dd HH:mm:ss"
+foreach ($n in 20..25) {
+    Write-Host "Setando relógio em 192.168.1.$n -&gt; $NOW" -ForegroundColor Yellow
+    ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="13637a53222a213d22252b3d22">[email&#160;protected]</a>.$n "sudo timedatectl set-ntp false &amp;&amp; sudo date -s '$NOW'"
+}</pre>
+    <div class="why"><strong>Por que isso é vital pro Raft?</strong> O algoritmo Raft usa timeouts de eleição (150–300ms). Se dois nós divergem mais do que isso, eles podem se considerar "líder" simultaneamente — split-brain. Em rede sem internet, sincronizar pelo laptop é o jeito mais simples de manter ±1s entre todos.</div>
+  </div>
+
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(1)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(3)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 3 — Docker ════════════ -->
+<div class="page" id="p3">
+  <div class="done-banner">✓ Etapa concluída</div>
+  <div class="step-header">
+    <div class="step-tag">Passo 4 · Infraestrutura</div>
+    <div class="step-title">Instalação do Docker em paralelo</div>
+    <div class="step-desc">Usar Start-Job no PowerShell para instalar nos 6 nós ao mesmo tempo, transformando ~30min sequenciais em ~5min paralelos.</div>
+  </div>
+
+<pre>$IPS = 20..25
+$jobs = @()
+
+Write-Host "Instalando Docker em paralelo..." -ForegroundColor Cyan
+foreach ($n in $IPS) {
+    $ip = "192.168.1.$n"
+    $jobs += Start-Job -ScriptBlock {
+        param($alvo)
+        ssh pi@$alvo @"
+curl -fsSL https://get.docker.com | sh
+sudo usermod -aG docker pi
+sudo apt-get install -y docker-compose-plugin
+sudo systemctl enable --now docker
+"@
+    } -ArgumentList $ip
+}
+
+Write-Host "Aguardando (~5 min)..." -ForegroundColor Yellow
+Wait-Job -Job $jobs | Out-Null
+Receive-Job -Job $jobs
+Remove-Job -Job $jobs</pre>
+
+  <div class="why"><strong>Por que Start-Job e não ForEach-Object -Parallel?</strong> O `-Parallel` exige PowerShell 7+. Start-Job funciona em qualquer Windows com PS 5.1, não precisa de runspaces e o stdout do SSH é capturado certinho.</div>
+
+  <div class="verify">
+    <div class="verify-label">✓ Verificar</div>
+<pre>foreach ($n in 20..25) { ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="d5a5bc95e4ece7fbe4e3edfbe4">[email&#160;protected]</a>.$n "docker --version" }</pre>
+  </div>
+
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(2)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(4)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 4 — Firewall + pull ════════════ -->
+<div class="page" id="p4">
+  <div class="done-banner">✓ Etapa concluída</div>
+  <div class="step-header">
+    <div class="step-tag">Passo 5 · Infraestrutura</div>
+    <div class="step-title">Firewall (UFW) e pull do Redis</div>
+    <div class="step-desc">Abrir as 4 portas críticas e pré-baixar a imagem do Redis em paralelo — assim o `compose up` na próxima etapa sobe instantaneamente.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Portas que precisam estar abertas</h3></div></div>
+    <table>
+      <tr><th>Porta</th><th>Serviço</th><th>Direção</th></tr>
+      <tr><td>22/tcp</td><td>SSH</td><td>laptop → nó</td></tr>
+      <tr><td>6379/tcp</td><td>Redis cliente</td><td>laptop+nós</td></tr>
+      <tr><td>16379/tcp</td><td>Redis cluster bus</td><td>nó ↔ nó (gossip)</td></tr>
+      <tr><td>4321/tcp</td><td>Raft (pysyncobj)</td><td>nó ↔ nó</td></tr>
+      <tr><td>8000/tcp</td><td>API FastAPI</td><td>laptop/frontend → nó</td></tr>
+    </table>
+  </div>
+
+<pre>$IPS = 20..25
+$jobs = @()
+foreach ($n in $IPS) {
+    $ip = "192.168.1.$n"
+    $jobs += Start-Job -ScriptBlock {
+        param($alvo)
+        $cmd = "sudo apt-get install -y ufw &amp;&amp; " +
+               "sudo ufw allow 22/tcp &amp;&amp; " +
+               "sudo ufw allow 6379/tcp &amp;&amp; " +
+               "sudo ufw allow 16379/tcp &amp;&amp; " +
+               "sudo ufw allow 4321/tcp &amp;&amp; " +
+               "sudo ufw allow 8000/tcp &amp;&amp; " +
+               "sudo ufw --force enable"
+        ssh pi@$alvo $cmd
+    } -ArgumentList $ip
+}
+Wait-Job $jobs | Out-Null; Receive-Job $jobs; Remove-Job $jobs
+
+# Pull do Redis
+$jobs = @()
+foreach ($n in $IPS) {
+    $jobs += Start-Job { param($a) ssh pi@$a "docker pull redis:7-alpine" } -ArgumentList "192.168.1.$n"
+}
+Wait-Job $jobs | Out-Null; Receive-Job $jobs; Remove-Job $jobs</pre>
+
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(3)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(5)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 5 — Deploy Redis ════════════ -->
+<div class="page" id="p5">
+  <div class="done-banner">✓ Etapa concluída</div>
+  <div class="step-header">
+    <div class="step-tag">Passo 6 · Infraestrutura</div>
+    <div class="step-title">Deploy do Redis (com fix CRLF)</div>
+    <div class="step-desc">A pegadinha clássica do Windows: arquivos gerados pelo PowerShell vêm com CRLF + BOM, que faz o Redis explodir com erro fatal de parsing. A cura é gerar via [System.IO.File]::WriteAllText e substituir `\r\n` por `\n`.</div>
+  </div>
+
+  <div class="callout danger"><span class="callout-icon">!</span><div><strong>Erro que isso evita:</strong> <code>FATAL CONFIG FILE ERROR: Bad directive or wrong number of arguments</code> na linha 1 do redis.conf. O culpado é o BOM invisível no início do arquivo.</div></div>
+
+<pre>$IPS = 20..25
+
+# 1. redis.conf (sem replicas — performance máxima)
+$RedisConf = @"
+port 6379
+cluster-enabled yes
+cluster-config-file /data/redis/nodes.conf
+cluster-node-timeout 2000
+cluster-require-full-coverage no
+cluster-migration-barrier 1
+appendonly yes
+appendfsync everysec
+dir /data/redis
+bind 0.0.0.0
+protected-mode no
+save 900 1
+save 300 10
+save 60 10000
+"@.Replace("`r`n","`n")
+
+# 2. docker-compose
+$ComposeYml = @"
+version: "3.9"
+services:
+  redis:
+    image: redis:7-alpine
+    container_name: cluster-redis
+    restart: always
+    network_mode: host
+    command: redis-server /etc/redis/redis.conf
+    volumes:
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
+      - /data/redis:/data/redis
+    healthcheck:
+      test: ["CMD","redis-cli","ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+"@.Replace("`r`n","`n")
+
+New-Item -ItemType Directory -Force -Path ".\redis" | Out-Null
+[System.IO.File]::WriteAllText("$PWD\redis\redis.conf", $RedisConf)
+[System.IO.File]::WriteAllText("$PWD\docker-compose.redis.yml", $ComposeYml)
+
+# 3. Distribuir e subir
+foreach ($n in $IPS) {
+    $ip = "192.168.1.$n"
+    Write-Host "--- Deploy em $ip ---" -ForegroundColor Yellow
+    ssh pi@$ip "sudo mkdir -p /data/redis &amp;&amp; sudo chown -R pi:pi /data/redis &amp;&amp; mkdir -p ~/cluster/redis"
+    scp .\redis\redis.conf       pi@${ip}:~/cluster/redis/
+    scp .\docker-compose.redis.yml pi@${ip}:~/cluster/
+    ssh pi@$ip "cd ~/cluster &amp;&amp; docker compose -f docker-compose.redis.yml up -d"
+}</pre>
+
+  <div class="why"><strong>Por que `network_mode: host`?</strong> O Redis Cluster anuncia o IP de cada nó via gossip. Em modo bridge, o container vê seu IP interno (172.x) e os outros nós tentam se conectar nesse IP — falha. Em modo host, ele usa o IP real do RPi e tudo funciona.</div>
+
+  <div class="verify">
+    <div class="verify-label">✓ Ping em todos</div>
+<pre>foreach ($n in 20..25) {
+    Write-Host "192.168.1.$n: " -NoNewline
+    ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="502039106169627e6166687e61">[email&#160;protected]</a>.$n "docker exec cluster-redis redis-cli ping"
+}</pre>
+  </div>
+
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(4)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(6)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 6 — Init cluster ════════════ -->
+<div class="page" id="p6">
+  <div class="done-banner">✓ Etapa concluída</div>
+  <div class="step-header">
+    <div class="step-tag">Passo 7 · Infraestrutura</div>
+    <div class="step-title">Inicializar o Redis Cluster (modo 6×0)</div>
+    <div class="step-desc">6 primários, 0 réplicas. A redundância sai da camada de aplicação via Redis Streams + recovery (passo 12), não da replicação do banco.</div>
+  </div>
+
+  <div class="why"><strong>Por que 6×0 e não 3×1?</strong> Para cargas de renderização 3D, a métrica que importa é throughput de tarefas/segundo, não durabilidade absoluta de cada chave. Réplicas custariam metade do cluster sem nada em troca: se uma tarefa se perder, o recovery devolve para a fila em &lt;10s. Trade-off consciente.</div>
+
+<pre># 1. Criar o cluster
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="cfbfa68ffef6fde1fef9f7e1fee1fdff">[email&#160;protected]</a> @"
+docker exec cluster-redis redis-cli --cluster create \
+  192.168.1.20:6379 192.168.1.21:6379 192.168.1.22:6379 \
+  192.168.1.23:6379 192.168.1.24:6379 192.168.1.25:6379 \
+  --cluster-replicas 0 --cluster-yes
+"@
+
+Start-Sleep -Seconds 5
+
+# 2. Criar a stream e o consumer group
+# OBS: o `{stream}` força tudo a cair no mesmo slot (hash tag)
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="c8b8a188f9f1fae6f9fef0e6f9e6faf8">[email&#160;protected]</a> 'docker exec cluster-redis redis-cli -c XGROUP CREATE "{stream}:tasks" "cluster-workers" $ MKSTREAM'
+
+# 3. Status
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="93e3fad3a2aaa1bda2a5abbda2bda1a3">[email&#160;protected]</a> "docker exec cluster-redis redis-cli cluster info | grep cluster_state"</pre>
+
+  <div class="verify">
+    <div class="verify-label">✓ Esperado</div>
+<pre>cluster_state:ok</pre>
+  </div>
+
+  <div class="callout info"><span class="callout-icon">ℹ</span><div>A hash tag <code>{stream}</code> nos nomes de chave (ex: <code>{stream}:tasks</code>, <code>{stream}:results</code>) força o Redis Cluster a colocá-las todas no <strong>mesmo slot</strong>. Isso permite usar comandos multi-key (XREADGROUP, XACK, XAUTOCLAIM) sem erro <code>CROSSSLOT</code>.</div></div>
+
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(5)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(7)">começar passo 8 →</button>
+  </div>
+</div>
+
+<!-- ════════════ 7 — Estrutura Python ════════════ -->
+<div class="page" id="p7">
+  <div class="step-header">
+    <div class="step-tag">Passo 8 · Aplicação</div>
+    <div class="step-title">Estrutura Python do projeto</div>
+    <div class="step-desc">Criar virtualenv, dependências e o esqueleto de pastas em todos os 6 nós. Daqui pra frente cada arquivo `.py` será desenvolvido localmente no laptop e distribuído via `scp`.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Layout do projeto (no laptop)</h3></div></div>
+<pre>cluster/
+├── redis/
+│   └── redis.conf            # já feito
+├── docker-compose.redis.yml  # já feito
+├── app/
+│   ├── requirements.txt
+│   ├── config.py             # IPs, portas, constantes
+│   ├── daemon.py             # Raft (passo 9)
+│   ├── worker.py             # consumer da fila (passo 10)
+│   ├── torus.py              # matemática 3D (passo 11)
+│   ├── recovery.py           # XAUTOCLAIM (passo 12)
+│   └── api.py                # FastAPI (passo 13)
+├── frontend/
+│   └── index.html            # Three.js (passo 14)
+└── deploy/
+    ├── cluster-app.service   # systemd (passo 15)
+    └── push.ps1              # script de deploy</pre>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>requirements.txt</h3></div></div>
+    <div class="file-card">
+      <div class="file-card-head"><div class="dot"></div><span class="path">app/requirements.txt</span></div>
+<pre>redis==5.0.8
+pysyncobj==0.3.12
+fastapi==0.115.0
+uvicorn[standard]==0.30.6
+numpy==1.26.4</pre>
+    </div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">C</div><div class="substep-info"><h3>config.py — fonte única da verdade</h3></div></div>
+    <div class="file-card">
+      <div class="file-card-head"><div class="dot"></div><span class="path">app/config.py</span></div>
+<pre>"""Constantes do cluster. Importado por todos os módulos."""
+import os, socket
+
+# Lista canônica de nós
+NODES = [f"192.168.1.{i}" for i in range(20, 26)]
+
+# Identidade deste nó (descoberta pelo IP da interface)
+def my_ip() -&gt; str:
+    s = socket.socket(socket.AF_INET, socket.SOCK_DGRAM)
+    try:
+        s.connect(("8.8.8.8", 80))
+        return s.getsockname()[0]
+    except OSError:
+        return "127.0.0.1"
+    finally:
+        s.close()
+
+MY_IP   = os.environ.get("NODE_IP", my_ip())
+MY_NAME = f"rpi-{NODES.index(MY_IP)+1:02d}" if MY_IP in NODES else "unknown"
+
+# Portas
+REDIS_PORT = 6379
+RAFT_PORT  = 4321
+API_PORT   = 8000
+
+# Redis Streams
+STREAM_TASKS   = "{stream}:tasks"
+STREAM_RESULTS = "{stream}:results"
+GROUP_NAME     = "cluster-workers"
+
+# Recovery
+PENDING_TIMEOUT_MS = 10_000   # tarefa órfã após 10s sem ACK
+</pre>
+    </div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">D</div><div class="substep-info"><h3>Bootstrap em paralelo (PowerShell)</h3></div></div>
+<pre>$IPS = 20..25
+$jobs = @()
+
+# Instalar Python venv + libs nativas
+foreach ($n in $IPS) {
+    $jobs += Start-Job -ScriptBlock { param($a)
+        ssh pi@$a "sudo apt-get install -y python3-venv python3-dev build-essential"
+    } -ArgumentList "192.168.1.$n"
+}
+Wait-Job $jobs | Out-Null; Receive-Job $jobs; Remove-Job $jobs
+
+# Distribuir requirements e criar venv
+foreach ($n in $IPS) {
+    $ip = "192.168.1.$n"
+    ssh pi@$ip "mkdir -p ~/cluster/app"
+    scp .\app\requirements.txt pi@${ip}:~/cluster/app/
+}
+
+$jobs = @()
+foreach ($n in $IPS) {
+    $jobs += Start-Job -ScriptBlock { param($a)
+        ssh pi@$a "cd ~/cluster/app &amp;&amp; python3 -m venv venv &amp;&amp; ./venv/bin/pip install --upgrade pip &amp;&amp; ./venv/bin/pip install -r requirements.txt"
+    } -ArgumentList "192.168.1.$n"
+}
+Wait-Job $jobs | Out-Null; Receive-Job $jobs; Remove-Job $jobs</pre>
+  </div>
+
+  <div class="callout warn"><span class="callout-icon">⚠</span><div>A instalação do <code>numpy</code> em ARM compila durante ~3-5 min por nó. Em paralelo cabe em ~6 min. Se quiser cortar pra 30s, instale <code>python3-numpy</code> via apt antes do venv e use <code>--system-site-packages</code>.</div></div>
+
+  <button class="mark-done" id="done-7" onclick="markDone(7,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(6)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(8)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 8 — Raft daemon ════════════ -->
+<div class="page" id="p8">
+  <div class="step-header">
+    <div class="step-tag">Passo 9 · Aplicação</div>
+    <div class="step-title">Daemon Raft com pysyncobj</div>
+    <div class="step-desc">O cérebro do cluster. Roda em todos os 6 nós, conversa pela porta 4321 e elege um líder. Só o líder gera tarefas novas — os outros 5 ficam apenas como workers até o líder morrer e a eleição re-acontecer.</div>
+  </div>
+
+  <div class="why"><strong>Por que pysyncobj?</strong> Implementa Raft puro em Python, sem depender de etcd/Consul. ~300 linhas de código C-extension, persistência em disco opcional, e a API é literalmente "herde de SyncObj e marque métodos com @replicated". Ideal pra não-Java.</div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>O daemon</h3></div></div>
+    <div class="file-card">
+      <div class="file-card-head"><div class="dot"></div><span class="path">app/daemon.py</span></div>
+<pre>"""
+Raft daemon: roda em cada nó, mantém estado replicado e elege um líder.
+Só o líder chama gerar_tarefas(). Os outros viram workers passivos.
+"""
+import time, signal, sys, logging
+from pysyncobj import SyncObj, SyncObjConf, replicated
+from config import NODES, MY_IP, MY_NAME, RAFT_PORT
+
+logging.basicConfig(
+    level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s",
+)
+log = logging.getLogger("daemon")
+
+
+class ClusterState(SyncObj):
+    """Estado replicado entre todos os nós via Raft."""
+    def __init__(self):
+        self_addr = f"{MY_IP}:{RAFT_PORT}"
+        peers     = [f"{ip}:{RAFT_PORT}" for ip in NODES if ip != MY_IP]
+
+        cfg = SyncObjConf(
+            dynamicMembershipChange = True,
+            appendEntriesUseBatch   = True,
+            commandsWaitLeader      = True,
+            connectionTimeout       = 3.5,
+            raftMinTimeout          = 0.4,
+            raftMaxTimeout          = 1.4,
+        )
+        super().__init__(self_addr, peers, cfg)
+
+        self.__last_batch_id = 0
+        self.__total_tasks   = 0
+
+    @replicated
+    def increment_batch(self) -&gt; int:
+        self.__last_batch_id += 1
+        return self.__last_batch_id
+
+    @replicated
+    def add_tasks(self, n: int):
+        self.__total_tasks += n
+
+    def stats(self) -&gt; dict:
+        return {
+            "last_batch_id": self.__last_batch_id,
+            "total_tasks":   self.__total_tasks,
+        }
+
+
+def main():
+    log.info(f"[{MY_NAME}] iniciando Raft em {MY_IP}:{RAFT_PORT}")
+    state = ClusterState()
+
+    # Esperar o cluster Raft formar quórum
+    while state._getLeader() is None:
+        log.info("aguardando eleição...")
+        time.sleep(1)
+
+    log.info(f"líder eleito: {state._getLeader()}")
+
+    # Loop principal: só o líder produz tarefas
+    from torus import generate_torus_batch
+    import redis
+    r = redis.Redis(host=MY_IP, port=6379, decode_responses=True)
+    from config import STREAM_TASKS
+
+    BATCH_SIZE = 200      # pontos por batch
+    INTERVAL_S = 0.5      # gera 400 tarefas/s
+
+    while True:
+        try:
+            if state._isLeader():
+                batch_id = state.increment_batch(sync=True)
+                points   = generate_torus_batch(batch_id, BATCH_SIZE)
+                pipe = r.pipeline()
+                for p in points:
+                    pipe.xadd(STREAM_TASKS, p)
+                pipe.execute()
+                state.add_tasks(BATCH_SIZE, sync=False)
+                log.info(f"[LÍDER] batch {batch_id} -&gt; {BATCH_SIZE} tarefas")
+            time.sleep(INTERVAL_S)
+        except Exception as e:
+            log.error(f"loop error: {e}")
+            time.sleep(2)
+
+
+def shutdown(signum, frame):
+    log.info("encerrando...")
+    sys.exit(0)
+
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT,  shutdown)
+    main()
+</pre>
+    </div>
+  </div>
+
+  <div class="callout info"><span class="callout-icon">ℹ</span><div><strong>Detalhes importantes:</strong><br>
+  • <code>raftMinTimeout / raftMaxTimeout</code>: 400–1400ms. Em LAN cabeada Gigabit isso é mais que suficiente e dá uma eleição em &lt;2s.<br>
+  • <code>increment_batch(sync=True)</code>: bloqueia até o log Raft confirmar a maioria — garante batch_id único entre todos.<br>
+  • <code>add_tasks(sync=False)</code>: fire-and-forget, métricas não precisam de garantia forte.</div></div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>Teste rápido (sem worker ainda)</h3></div></div>
+<pre># Distribuir o daemon nos 6 nós
+foreach ($n in 20..25) {
+    scp .\app\daemon.py .\app\config.py <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="a4d4cde4959d968a95929c8a95">[email&#160;protected]</a>.$n`:~/cluster/app/
+}
+
+# Subir manualmente em 3 terminais separados pra ver a eleição
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="1b6b725b2a2229352a2d23352a35292b">[email&#160;protected]</a> "cd ~/cluster/app &amp;&amp; ./venv/bin/python daemon.py"
+# (em outro PowerShell)
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="cfbfa68ffef6fde1fef9f7e1fee1fdfe">[email&#160;protected]</a> "cd ~/cluster/app &amp;&amp; ./venv/bin/python daemon.py"
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="88f8e1c8b9b1baa6b9beb0a6b9a6baba">[email&#160;protected]</a> "cd ~/cluster/app &amp;&amp; ./venv/bin/python daemon.py"</pre>
+    <div class="verify">
+      <div class="verify-label">✓ Esperado</div>
+<pre>[rpi-01] iniciando Raft em 192.168.1.20:4321
+aguardando eleição...
+líder eleito: 192.168.1.20:4321
+[LÍDER] batch 1 -&gt; 200 tarefas
+[LÍDER] batch 2 -&gt; 200 tarefas</pre>
+    </div>
+  </div>
+
+  <button class="mark-done" id="done-8" onclick="markDone(8,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(7)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(9)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 9 — Worker ════════════ -->
+<div class="page" id="p9">
+  <div class="step-header">
+    <div class="step-tag">Passo 10 · Aplicação</div>
+    <div class="step-title">Worker — consumir e processar tarefas</div>
+    <div class="step-desc">Cada nó (líder OU follower) roda um worker em paralelo ao daemon. Lê da stream via consumer group, processa o ponto 3D e devolve o resultado.</div>
+  </div>
+
+  <div class="file-card">
+    <div class="file-card-head"><div class="dot"></div><span class="path">app/worker.py</span></div>
+<pre>"""
+Worker: lê {stream}:tasks via consumer group, processa, escreve em {stream}:results.
+Usa o nome do nó como consumer-id, então o recovery sabe quem morreu.
+"""
+import time, json, logging, signal, sys
+import redis
+from config import (
+    MY_IP, MY_NAME, REDIS_PORT,
+    STREAM_TASKS, STREAM_RESULTS, GROUP_NAME,
+)
+from torus import process_point
+
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger(f"worker-{MY_NAME}")
+
+
+def connect():
+    r = redis.Redis(host=MY_IP, port=REDIS_PORT, decode_responses=True)
+    # Garante o group (idempotente — erro BUSYGROUP é esperado)
+    try:
+        r.xgroup_create(STREAM_TASKS, GROUP_NAME, id="$", mkstream=True)
+    except redis.ResponseError as e:
+        if "BUSYGROUP" not in str(e):
+            raise
+    return r
+
+
+def main():
+    r = connect()
+    log.info(f"worker {MY_NAME} pronto, lendo de {STREAM_TASKS}")
+
+    consumer = MY_NAME  # consumer-id estável
+
+    while True:
+        try:
+            # Bloqueia até 2s esperando até 16 tarefas
+            resp = r.xreadgroup(
+                GROUP_NAME, consumer,
+                {STREAM_TASKS: "&gt;"},
+                count=16, block=2000,
+            )
+            if not resp:
+                continue
+
+            _, messages = resp[0]
+            ack_ids = []
+            results = []
+
+            for msg_id, fields in messages:
+                t0 = time.perf_counter()
+                point = process_point(fields)
+                dt_ms = (time.perf_counter() - t0) * 1000
+
+                results.append({
+                    "task_id":   msg_id,
+                    "worker":    MY_NAME,
+                    "x":         point["x"],
+                    "y":         point["y"],
+                    "z":         point["z"],
+                    "compute_ms": f"{dt_ms:.2f}",
+                })
+                ack_ids.append(msg_id)
+
+            # Pipeline: gravar todos os resultados + ACK em uma RTT
+            pipe = r.pipeline()
+            for res in results:
+                pipe.xadd(STREAM_RESULTS, res, maxlen=10_000, approximate=True)
+            pipe.xack(STREAM_TASKS, GROUP_NAME, *ack_ids)
+            pipe.execute()
+
+            log.info(f"processadas {len(results)} tarefas")
+
+        except redis.ConnectionError as e:
+            log.error(f"redis caiu? {e} — reconectando em 2s")
+            time.sleep(2)
+            r = connect()
+        except Exception as e:
+            log.exception(f"erro inesperado: {e}")
+            time.sleep(1)
+
+
+def shutdown(*_):
+    log.info("worker encerrado")
+    sys.exit(0)
+
+if __name__ == "__main__":
+    signal.signal(signal.SIGTERM, shutdown)
+    signal.signal(signal.SIGINT,  shutdown)
+    main()
+</pre>
+  </div>
+
+  <div class="why"><strong>Por que MAXLEN aproximado?</strong> A stream de resultados cresce sem parar. <code>maxlen=10_000, approximate=True</code> mantém as últimas ~10k entradas (com algumas a mais por eficiência) — o frontend só precisa do que está visível na tela mesmo.</div>
+
+  <div class="callout info"><span class="callout-icon">ℹ</span><div>O <code>consumer = MY_NAME</code> é a chave do recovery: quando o `rpi-03` morre, suas mensagens ficam em <code>pending</code> sob o consumer-id "rpi-03". O recovery (passo 12) vai detectar isso via <code>XAUTOCLAIM</code> e redistribuir.</div></div>
+
+  <button class="mark-done" id="done-9" onclick="markDone(9,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(8)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(10)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 10 — Torus 3D ════════════ -->
+<div class="page" id="p10">
+  <div class="step-header">
+    <div class="step-tag">Passo 11 · Aplicação</div>
+    <div class="step-title">Cálculo do Torus 3D</div>
+    <div class="step-desc">A matemática é simples — um torus paramétrico com perturbação harmônica. O ponto da etapa não é a complexidade, é demonstrar que 6 nós dividem trabalho real e retornam pontos que desenham uma superfície coerente no frontend.</div>
+  </div>
+
+  <div class="why"><strong>Equação paramétrica:</strong><br>
+  x = (R + r·cos(v + φ(t))) · cos(u)<br>
+  y = (R + r·cos(v + φ(t))) · sin(u)<br>
+  z = r · sin(v + φ(t))<br><br>
+  Onde <em>R</em> é o raio maior, <em>r</em> o menor, <em>u,v</em> ∈ [0, 2π) e <em>φ(t)</em> uma função que faz a superfície "respirar" no tempo.</div>
+
+  <div class="file-card">
+    <div class="file-card-head"><div class="dot"></div><span class="path">app/torus.py</span></div>
+<pre>"""
+Geração e processamento de pontos sobre um torus paramétrico.
+A geração é feita pelo líder (em batches); o processamento é o que
+o worker executa por ponto.
+"""
+import math, time
+from typing import List, Dict
+
+R = 2.0   # raio maior
+r = 0.7   # raio menor
+RES_U = 80   # resolução em u
+RES_V = 40   # resolução em v
+
+
+def generate_torus_batch(batch_id: int, size: int) -&gt; List[Dict[str, str]]:
+    """
+    O líder chama esta função. Cada item da lista vira um XADD.
+    Os valores precisam ser strings (limitação do Redis Streams).
+    """
+    out = []
+    t = time.time()
+    for k in range(size):
+        idx = (batch_id * size + k) % (RES_U * RES_V)
+        i, j = divmod(idx, RES_V)
+        u = (i / RES_U) * 2.0 * math.pi
+        v = (j / RES_V) * 2.0 * math.pi
+        out.append({
+            "u": f"{u:.6f}",
+            "v": f"{v:.6f}",
+            "t": f"{t:.6f}",
+            "batch": str(batch_id),
+        })
+    return out
+
+
+def process_point(fields: Dict[str, str]) -&gt; Dict[str, float]:
+    """
+    O worker chama isso. Carga útil real: trigonometria + perturbação.
+    Em CPU ARM isso roda em ~30-80 µs por ponto. Aumentar a complexidade
+    aqui é o que estressa o cluster (ex: ray-marching, voxel sampling).
+    """
+    u = float(fields["u"])
+    v = float(fields["v"])
+    t = float(fields["t"])
+    age = time.time() - t
+
+    # perturbação temporal — faz a superfície "respirar"
+    phi = 0.5 * math.sin(2.0 * t * 0.3)
+    rr  = r * (1.0 + 0.15 * math.sin(3 * u + t * 0.7))
+
+    x = (R + rr * math.cos(v + phi)) * math.cos(u)
+    y = (R + rr * math.cos(v + phi)) * math.sin(u)
+    z = rr * math.sin(v + phi)
+
+    return {"x": x, "y": y, "z": z, "age_ms": age * 1000}
+</pre>
+  </div>
+
+  <div class="callout purple"><span class="callout-icon">★</span><div><strong>Quer estressar de verdade?</strong> Substitua <code>process_point</code> por um ray-marching de SDF (signed distance field) com 64 passos por raio. Cada ponto vira ~5ms de cálculo, e o cluster passa a justificar sua existência. O esqueleto da fila não muda nada.</div></div>
+
+  <button class="mark-done" id="done-10" onclick="markDone(10,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(9)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(11)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 11 — Recovery ════════════ -->
+<div class="page" id="p11">
+  <div class="step-header">
+    <div class="step-tag">Passo 12 · Aplicação</div>
+    <div class="step-title">Recovery — devolver tarefas órfãs à fila</div>
+    <div class="step-desc">Sem réplicas no Redis, esse módulo é VITAL. Se um worker morre no meio do processamento, a tarefa fica "pending" eternamente. O recovery detecta isso e reentrega para outro worker.</div>
+  </div>
+
+  <div class="callout danger"><span class="callout-icon">!</span><div>Sem este módulo, num cluster 6×0 perder um nó significa <strong>perder definitivamente</strong> as tarefas que ele havia recebido e ainda não confirmado. Esta é a contrapartida que aceitamos no passo 7 quando escolhemos performance sobre replicação.</div></div>
+
+  <div class="file-card">
+    <div class="file-card-head"><div class="dot"></div><span class="path">app/recovery.py</span></div>
+<pre>"""
+Recovery loop: usa XAUTOCLAIM para tomar mensagens cujo consumer
+não fez ACK em PENDING_TIMEOUT_MS. Roda APENAS no líder Raft —
+assim evitamos múltiplos recoveries simultâneos competindo.
+"""
+import time, logging
+import redis
+from config import (
+    MY_IP, MY_NAME, REDIS_PORT,
+    STREAM_TASKS, GROUP_NAME, PENDING_TIMEOUT_MS, NODES,
+)
+
+logging.basicConfig(level=logging.INFO,
+    format="%(asctime)s [%(levelname)s] %(message)s")
+log = logging.getLogger("recovery")
+
+
+def run(is_leader_fn, stop_fn=lambda: False):
+    """
+    is_leader_fn: callable que retorna True se este nó é o líder Raft.
+    stop_fn:     callable que retorna True para encerrar o loop.
+    """
+    r = redis.Redis(host=MY_IP, port=REDIS_PORT, decode_responses=True)
+    consumer_id = f"recovery-{MY_NAME}"
+    cursor = "0-0"
+
+    while not stop_fn():
+        try:
+            if not is_leader_fn():
+                time.sleep(2)
+                cursor = "0-0"
+                continue
+
+            # XAUTOCLAIM &lt;key&gt; &lt;group&gt; &lt;consumer&gt; &lt;min-idle-ms&gt; &lt;start&gt;
+            cursor, claimed, _ = r.xautoclaim(
+                STREAM_TASKS, GROUP_NAME, consumer_id,
+                min_idle_time=PENDING_TIMEOUT_MS,
+                start_id=cursor, count=64,
+            )
+
+            if claimed:
+                log.warning(f"reclaimed {len(claimed)} tarefas órfãs")
+                # Não processamos aqui — só reentregamos.
+                # Como o `consumer_id` é o recovery, deixamos pendentes
+                # com idle=0 para o próximo XREADGROUP de qualquer worker.
+                # Truque: re-XADD as mesmas tarefas e ACK as antigas.
+                pipe = r.pipeline()
+                for msg_id, fields in claimed:
+                    pipe.xadd(STREAM_TASKS, fields)
+                    pipe.xack(STREAM_TASKS, GROUP_NAME, msg_id)
+                pipe.execute()
+
+            time.sleep(2)
+
+        except Exception as e:
+            log.error(f"loop error: {e}")
+            time.sleep(3)
+
+
+if __name__ == "__main__":
+    # Modo standalone: assume sempre líder (para testes)
+    run(is_leader_fn=lambda: True)
+</pre>
+  </div>
+
+  <div class="why"><strong>Por que re-XADD em vez de só XCLAIM?</strong> Se a gente apenas reclamasse para o consumer "recovery-rpi-01", a tarefa precisaria ser processada por esse processo. Re-publicando como uma nova mensagem, qualquer worker da consumer-group pode pegar — distribui melhor a carga.</div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Integração com o daemon</h3></div></div>
+    <p style="color:var(--muted);font-size:12.5px">Adicione no <code>daemon.py</code>, no início do <code>main()</code>:</p>
+<pre>import threading
+from recovery import run as recovery_run
+
+th = threading.Thread(
+    target=recovery_run,
+    args=(state._isLeader,),  # passa o método como callback
+    daemon=True,
+)
+th.start()</pre>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>Teste de chaos</h3></div></div>
+<pre># 1. Suba tudo
+# 2. Em outro terminal, derrube um worker no meio do processamento:
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="5b2b321b6a6269756a6d63756a756968">[email&#160;protected]</a> "docker exec cluster-redis redis-cli xpending '{stream}:tasks' cluster-workers"
+# Anote: tem N pendentes do consumer rpi-04
+
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="5e2e371e6f676c706f6866706f706c6d">[email&#160;protected]</a> "sudo systemctl stop cluster-app"
+
+# 3. Espere 15s, cheque novamente:
+ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="aedec7ee9f979c809f9896809f809c9e">[email&#160;protected]</a> "docker exec cluster-redis redis-cli xpending '{stream}:tasks' cluster-workers"
+# Esperado: pending de rpi-04 zerou, outros workers absorveram</pre>
+  </div>
+
+  <button class="mark-done" id="done-11" onclick="markDone(11,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(10)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(12)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 12 — API HTTP ════════════ -->
+<div class="page" id="p12">
+  <div class="step-header">
+    <div class="step-tag">Passo 13 · Aplicação</div>
+    <div class="step-title">API HTTP de status (FastAPI)</div>
+    <div class="step-desc">Cada nó expõe `/health`, `/queue/status` e `/results/recent`. O frontend Three.js consome `/results/recent` para desenhar; o watchdog consome `/health` para monitorar.</div>
+  </div>
+
+  <div class="file-card">
+    <div class="file-card-head"><div class="dot"></div><span class="path">app/api.py</span></div>
+<pre>"""
+FastAPI server: roda em todos os nós, porta 8000.
+Endpoints:
+  GET /health           — quem sou eu, sou líder, redis ok
+  GET /queue/status     — tamanho da stream e pending count
+  GET /results/recent   — últimos N pontos 3D (para o frontend)
+"""
+import time, redis
+from fastapi import FastAPI
+from fastapi.middleware.cors import CORSMiddleware
+from config import (
+    MY_IP, MY_NAME, REDIS_PORT,
+    STREAM_TASKS, STREAM_RESULTS, GROUP_NAME, NODES,
+)
+
+app = FastAPI(title=f"cluster-rpi {MY_NAME}")
+app.add_middleware(
+    CORSMiddleware,
+    allow_origins=["*"], allow_methods=["*"], allow_headers=["*"],
+)
+
+START_T = time.time()
+r = redis.Redis(host=MY_IP, port=REDIS_PORT, decode_responses=True,
+                socket_timeout=1.5)
+
+# O daemon Raft precisa publicar quem é líder em algum lugar acessível
+# pela API — usamos o próprio Redis como bus de status (chave volátil).
+LEADER_KEY = "{stream}:cluster:leader"
+
+
+@app.get("/health")
+def health():
+    try:
+        r.ping()
+        redis_ok = "ok"
+    except Exception:
+        redis_ok = "down"
+
+    try:
+        leader = r.get(LEADER_KEY)
+    except Exception:
+        leader = None
+
+    return {
+        "node":      MY_NAME,
+        "ip":        MY_IP,
+        "is_leader": leader == MY_IP,
+        "leader":    leader,
+        "redis":     redis_ok,
+        "uptime_s":  int(time.time() - START_T),
+        "raft_peers": len(NODES) - 1,
+        "status":    "ok" if redis_ok == "ok" else "degraded",
+    }
+
+
+@app.get("/queue/status")
+def queue_status():
+    try:
+        info = r.xinfo_stream(STREAM_TASKS)
+        pending = r.xpending(STREAM_TASKS, GROUP_NAME)
+        return {
+            "stream_length": info["length"],
+            "first_id":      info["first-entry"][0] if info["first-entry"] else None,
+            "last_id":       info["last-entry"][0]  if info["last-entry"]  else None,
+            "pending":       pending["pending"] if pending else 0,
+        }
+    except Exception as e:
+        return {"error": str(e)}
+
+
+@app.get("/results/recent")
+def results_recent(limit: int = 500):
+    """Retorna os últimos N pontos da stream de resultados."""
+    try:
+        # XREVRANGE pega do mais novo para o mais velho
+        entries = r.xrevrange(STREAM_RESULTS, count=limit)
+        return {
+            "count": len(entries),
+            "points": [
+                {
+                    "id":     msg_id,
+                    "x":      float(f["x"]),
+                    "y":      float(f["y"]),
+                    "z":      float(f["z"]),
+                    "worker": f["worker"],
+                }
+                for msg_id, f in entries
+            ],
+        }
+    except Exception as e:
+        return {"error": str(e), "points": []}
+</pre>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Daemon publica quem é o líder</h3></div></div>
+    <p style="color:var(--muted);font-size:12.5px">Adicione dentro do loop principal do <code>daemon.py</code>:</p>
+<pre>if state._isLeader():
+    r.set("{stream}:cluster:leader", MY_IP, ex=5)  # TTL 5s
+</pre>
+    <div class="why"><strong>Por que TTL?</strong> Se o líder cair sem conseguir limpar a chave, ela expira sozinha em 5s e o próximo líder a sobrescreve. Sem TTL, ficaria um "líder fantasma" no Redis confundindo o frontend.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>Subir a API</h3></div></div>
+<pre># Em cada nó (ou via systemd no passo 15)
+cd ~/cluster/app
+./venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
+
+# Teste do laptop
+curl http://192.168.1.20:8000/health</pre>
+  </div>
+
+  <button class="mark-done" id="done-12" onclick="markDone(12,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(11)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(13)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 13 — Frontend ════════════ -->
+<div class="page" id="p13">
+  <div class="step-header">
+    <div class="step-tag">Passo 14 · Operação</div>
+    <div class="step-title">Frontend Three.js — visualizar o cluster trabalhando</div>
+    <div class="step-desc">Página HTML estática que faz polling em `/results/recent` e desenha os pontos 3D. Cada worker tem uma cor distinta — você literalmente vê quem está fazendo o quê.</div>
+  </div>
+
+  <div class="file-card">
+    <div class="file-card-head"><div class="dot"></div><span class="path">frontend/index.html</span></div>
+<pre>&lt;!DOCTYPE html&gt;
+&lt;html lang="pt-br"&gt;
+&lt;head&gt;
+&lt;meta charset="utf-8"&gt;
+&lt;title&gt;Cluster RPi — Render 3D&lt;/title&gt;
+&lt;style&gt;
+  body{margin:0;background:#0a0d14;color:#e2e8f0;font-family:system-ui,sans-serif;overflow:hidden}
+  #info{position:fixed;top:12px;left:12px;background:rgba(20,25,40,.85);
+        padding:10px 14px;border-radius:8px;border:1px solid #2a3248;font-size:12px}
+  #info h1{font-size:13px;margin:0 0 6px;color:#4f8ef7}
+  .legend{display:flex;gap:8px;margin-top:6px;flex-wrap:wrap}
+  .legend span{display:inline-flex;align-items:center;gap:4px}
+  .dot{width:10px;height:10px;border-radius:50%;display:inline-block}
+&lt;/style&gt;
+&lt;/head&gt;
+&lt;body&gt;
+&lt;div id="info"&gt;
+  &lt;h1&gt;Cluster RPi · Torus 3D&lt;/h1&gt;
+  &lt;div&gt;Pontos: &lt;b id="count"&gt;0&lt;/b&gt; · FPS: &lt;b id="fps"&gt;0&lt;/b&gt;&lt;/div&gt;
+  &lt;div&gt;Líder: &lt;b id="leader"&gt;?&lt;/b&gt;&lt;/div&gt;
+  &lt;div class="legend" id="legend"&gt;&lt;/div&gt;
+&lt;/div&gt;
+
+&lt;script type="importmap"&gt;
+{ "imports": { "three": "https://cdn.jsdelivr.net/npm/<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="4a3e22382f2f0a7a647b7c7b647a">[email&#160;protected]</a>/build/three.module.js",
+               "three/addons/": "https://cdn.jsdelivr.net/npm/<a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="7a0e12081f1f3a4a544b4c4b544a">[email&#160;protected]</a>/examples/jsm/" } }
+&lt;/script&gt;
+
+&lt;script type="module"&gt;
+import * as THREE from 'three';
+import { OrbitControls } from 'three/addons/controls/OrbitControls.js';
+
+// === IMPORTANTE: aponte para qualquer nó do cluster ===
+const NODES = ["192.168.1.20","192.168.1.21","192.168.1.22",
+               "192.168.1.23","192.168.1.24","192.168.1.25"];
+const COLORS = {
+  "rpi-01":0xff5566, "rpi-02":0x55ff77, "rpi-03":0x55aaff,
+  "rpi-04":0xffaa33, "rpi-05":0xaa66ff, "rpi-06":0x33ddcc,
+};
+
+// Cena
+const scene    = new THREE.Scene();
+const camera   = new THREE.PerspectiveCamera(60, innerWidth/innerHeight, 0.1, 100);
+camera.position.set(5,5,5);
+const renderer = new THREE.WebGLRenderer({antialias:true});
+renderer.setSize(innerWidth,innerHeight);
+document.body.appendChild(renderer.domElement);
+const controls = new OrbitControls(camera, renderer.domElement);
+
+// Eixos para referência
+scene.add(new THREE.AxesHelper(3));
+
+// Pontos por worker (um Points geometry cada — colore fácil)
+const groups = {};
+for (const [name,color] of Object.entries(COLORS)) {
+  const geo = new THREE.BufferGeometry();
+  geo.setAttribute('position', new THREE.BufferAttribute(new Float32Array(0),3));
+  const mat = new THREE.PointsMaterial({color, size:0.04});
+  const pts = new THREE.Points(geo, mat);
+  scene.add(pts);
+  groups[name] = { geo, buffer: [] };
+
+  const el = document.createElement('span');
+  el.innerHTML = `&lt;span class="dot" style="background:#${color.toString(16).padStart(6,'0')}"&gt;&lt;/span&gt;${name}`;
+  document.getElementById('legend').appendChild(el);
+}
+
+// Round-robin nos nós para spread de carga no fetch
+let nodeIdx = 0;
+async function poll() {
+  const node = NODES[nodeIdx++ % NODES.length];
+  try {
+    const res = await fetch(`http://${node}:8000/results/recent?limit=400`);
+    const data = await res.json();
+    if (!data.points) return;
+
+    // Limpa buffers
+    for (const k in groups) groups[k].buffer = [];
+
+    for (const p of data.points) {
+      const g = groups[p.worker];
+      if (!g) continue;
+      g.buffer.push(p.x, p.y, p.z);
+    }
+
+    let total = 0;
+    for (const k in groups) {
+      const arr = new Float32Array(groups[k].buffer);
+      groups[k].geo.setAttribute('position', new THREE.BufferAttribute(arr,3));
+      groups[k].geo.attributes.position.needsUpdate = true;
+      total += arr.length / 3;
+    }
+    document.getElementById('count').textContent = total;
+
+    // Líder
+    const h = await fetch(`http://${node}:8000/health`).then(r=&gt;r.json());
+    document.getElementById('leader').textContent = h.leader || '?';
+  } catch(e) { /* nó offline — round-robin tenta o próximo */ }
+}
+setInterval(poll, 250);
+
+// Loop de render + FPS
+let last = performance.now(), frames = 0;
+function animate() {
+  requestAnimationFrame(animate);
+  controls.update();
+  renderer.render(scene, camera);
+  frames++;
+  const now = performance.now();
+  if (now - last &gt; 1000) {
+    document.getElementById('fps').textContent = frames;
+    frames = 0; last = now;
+  }
+}
+animate();
+addEventListener('resize', () =&gt; {
+  camera.aspect = innerWidth/innerHeight;
+  camera.updateProjectionMatrix();
+  renderer.setSize(innerWidth, innerHeight);
+});
+&lt;/script&gt;
+&lt;/body&gt;
+&lt;/html&gt;</pre>
+  </div>
+
+  <div class="callout info"><span class="callout-icon">ℹ</span><div>Abra direto do disco (<code>file://</code>) ou sirva via <code>python3 -m http.server 8080</code>. O CORS já está liberado na API. Round-robin no <code>poll()</code> distribui o load do frontend pelos 6 nós e garante que se um cair a UI continua viva.</div></div>
+
+  <div class="why"><strong>Por que um Points por worker?</strong> Permite cores distintas sem usar vertex colors (mais simples) e dá pra ligar/desligar workers individualmente em runtime (<code>group.visible = false</code>). Visualmente: você vê o torus se formando "em zonas", cada cor cobrindo a parte do espaço de parâmetros que aquele nó pegou da fila.</div>
+
+  <button class="mark-done" id="done-13" onclick="markDone(13,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(12)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(14)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 14 — Deploy systemd ════════════ -->
+<div class="page" id="p14">
+  <div class="step-header">
+    <div class="step-tag">Passo 15 · Operação</div>
+    <div class="step-title">Deploy automático com systemd</div>
+    <div class="step-desc">Três unidades por nó (`daemon`, `worker`, `api`), com restart automático e dependência do Docker. O script de deploy distribui tudo em paralelo.</div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Unidades systemd</h3></div></div>
+    <div class="file-card">
+      <div class="file-card-head"><div class="dot"></div><span class="path">deploy/cluster-daemon.service</span></div>
+<pre>[Unit]
+Description=Cluster RPi - Raft daemon
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/cluster/app
+ExecStart=/home/pi/cluster/app/venv/bin/python daemon.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target</pre>
+    </div>
+    <div class="file-card">
+      <div class="file-card-head"><div class="dot"></div><span class="path">deploy/cluster-worker.service</span></div>
+<pre>[Unit]
+Description=Cluster RPi - Worker
+After=cluster-daemon.service
+Requires=cluster-daemon.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/cluster/app
+ExecStart=/home/pi/cluster/app/venv/bin/python worker.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target</pre>
+    </div>
+    <div class="file-card">
+      <div class="file-card-head"><div class="dot"></div><span class="path">deploy/cluster-api.service</span></div>
+<pre>[Unit]
+Description=Cluster RPi - FastAPI
+After=cluster-daemon.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/cluster/app
+ExecStart=/home/pi/cluster/app/venv/bin/uvicorn api:app --host 0.0.0.0 --port 8000
+Restart=always
+
+[Install]
+WantedBy=multi-user.target</pre>
+    </div>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>Script de deploy (PowerShell)</h3></div></div>
+    <div class="file-card">
+      <div class="file-card-head"><div class="dot"></div><span class="path">deploy/push.ps1</span></div>
+<pre>param([int[]]$Nodes = (20..25))
+
+$jobs = @()
+foreach ($n in $Nodes) {
+    $ip = "192.168.1.$n"
+    Write-Host "→ $ip" -ForegroundColor Cyan
+
+    # Distribui código
+    scp .\app\*.py             pi@${ip}:~/cluster/app/
+    scp .\deploy\*.service     pi@${ip}:/tmp/
+
+    # Instala/recarrega units e reinicia (em paralelo)
+    $jobs += Start-Job -ScriptBlock { param($a)
+        ssh pi@$a @"
+sudo mv /tmp/cluster-*.service /etc/systemd/system/
+sudo systemctl daemon-reload
+sudo systemctl enable --now cluster-daemon cluster-worker cluster-api
+sudo systemctl restart cluster-daemon cluster-worker cluster-api
+"@
+    } -ArgumentList $ip
+}
+
+Wait-Job $jobs | Out-Null
+Receive-Job $jobs
+Remove-Job  $jobs
+
+Write-Host "`n--- Status ---" -ForegroundColor Green
+foreach ($n in $Nodes) {
+    Write-Host "192.168.1.$n: " -NoNewline
+    ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="dcacb59cede5eef2edeae4f2ed">[email&#160;protected]</a>.$n "systemctl is-active cluster-daemon cluster-worker cluster-api | tr '\n' ' '"
+    Write-Host ""
+}</pre>
+    </div>
+  </div>
+
+  <div class="verify">
+    <div class="verify-label">✓ Esperado</div>
+<pre>192.168.1.20: active active active
+192.168.1.21: active active active
+...
+192.168.1.25: active active active</pre>
+  </div>
+
+  <button class="mark-done" id="done-14" onclick="markDone(14,this)">✓ Etapa concluída</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(13)">← anterior</button>
+    <button class="nav-btn primary" onclick="go(15)">próximo →</button>
+  </div>
+</div>
+
+<!-- ════════════ 15 — Watchdog ════════════ -->
+<div class="page" id="p15">
+  <div class="step-header">
+    <div class="step-tag">Passo 16 · Operação</div>
+    <div class="step-title">Watchdog + comandos do dia-a-dia</div>
+    <div class="step-desc">Script Python que roda no laptop e mostra o cluster em tempo real no terminal. Mais o cookbook de comandos que você vai usar todo dia.</div>
+  </div>
+
+  <div class="file-card">
+    <div class="file-card-head"><div class="dot"></div><span class="path">watchdog.py (no laptop)</span></div>
+<pre>"""
+Watchdog do cluster RPi.
+Uso: python3 watchdog.py
+Requer: pip install requests
+"""
+import requests, time, os
+
+NODES    = [f"192.168.1.{i}" for i in range(20, 26)]
+INTERVAL = 2  # segundos
+
+def clear(): os.system('cls' if os.name == 'nt' else 'clear')
+
+def check(ip):
+    try:
+        h = requests.get(f"http://{ip}:8000/health", timeout=1.5).json()
+        return {**h, "online": True}
+    except Exception:
+        return {"online": False, "node": "?", "ip": ip}
+
+def queue(ip):
+    try:
+        return requests.get(f"http://{ip}:8000/queue/status", timeout=1.5).json()
+    except Exception:
+        return {}
+
+print("\033[36mWatchdog ativo. Ctrl+C para sair.\033[0m")
+try:
+    while True:
+        rows  = [check(ip) for ip in NODES]
+        up    = [r for r in rows if r["online"]]
+        down  = [r for r in rows if not r["online"]]
+        leaders = [r for r in up if r.get("is_leader")]
+        q = queue(up[0]["ip"]) if up else {}
+
+        clear()
+        print(f"┌{'─'*54}┐")
+        print(f"│  Cluster RPi v2 — {time.strftime('%H:%M:%S')}   ({len(up)}/{len(NODES)} online){' '*8}│")
+        print(f"├{'─'*54}┤")
+        for r in rows:
+            if r["online"]:
+                star = "★" if r.get("is_leader") else " "
+                color = "\033[32m" if r.get("status") == "ok" else "\033[33m"
+                print(f"│ {color}✓\033[0m {r['ip']:&lt;14} {star} {r['node']:&lt;8} "
+                      f"redis={r.get('redis','?'):&lt;4} up={r.get('uptime_s',0):&gt;5}s │")
+            else:
+                print(f"│ \033[31m✗\033[0m {r['ip']:&lt;14}    OFFLINE{' '*22}│")
+        print(f"├{'─'*54}┤")
+        if q:
+            print(f"│  fila: {q.get('stream_length',0):&gt;6}   pendentes: {q.get('pending',0):&gt;5}{' '*15}│")
+        if leaders:
+            print(f"│  líder: {leaders[0]['ip']}{' '*30}│")
+        print(f"└{'─'*54}┘")
+
+        if   len(leaders) == 0: print("\033[31m⚠ ALERTA: nenhum líder eleito!\033[0m")
+        elif len(leaders) &gt; 1:  print(f"\033[31m⚠ SPLIT-BRAIN: {len(leaders)} líderes!\033[0m")
+        if down: print(f"\033[31m⚠ OFFLINE: {', '.join(d['ip'] for d in down)}\033[0m")
+
+        time.sleep(INTERVAL)
+except KeyboardInterrupt:
+    print("\nencerrado.")
+</pre>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">A</div><div class="substep-info"><h3>Cookbook de comandos</h3></div></div>
+    <table>
+      <tr><th>O que</th><th>Comando</th></tr>
+      <tr><td>Logs ao vivo de 1 nó</td><td><code>ssh <a href="/cdn-cgi/l/email-protection" class="__cf_email__" data-cfemail="55253c15646c677b64636d7b647b6765">[email&#160;protected]</a> "journalctl -u cluster-daemon -f"</code></td></tr>
+      <tr><td>Tamanho da fila</td><td><code>docker exec cluster-redis redis-cli xlen "{stream}:tasks"</code></td></tr>
+      <tr><td>Pendentes por worker</td><td><code>redis-cli xpending "{stream}:tasks" cluster-workers</code></td></tr>
+      <tr><td>Forçar nova eleição</td><td><code>sudo systemctl restart cluster-daemon</code> no líder atual</td></tr>
+      <tr><td>Limpar streams</td><td><code>redis-cli del "{stream}:tasks" "{stream}:results"</code></td></tr>
+      <tr><td>Estado do Redis Cluster</td><td><code>redis-cli cluster info</code></td></tr>
+    </table>
+  </div>
+
+  <div class="substep">
+    <div class="substep-head"><div class="substep-num">B</div><div class="substep-info"><h3>Desligamento em massa seguro</h3></div></div>
+<pre>foreach ($n in 25..20) {   # ordem reversa: lider por ultimo
+    $ip = "192.168.1.$n"
+    Write-Host "-> desligando $ip" -ForegroundColor Red
+    ssh pi@$ip "sudo systemctl stop cluster-worker cluster-api cluster-daemon"
+    ssh pi@$ip "docker compose -f ~/cluster/docker-compose.redis.yml down"
+    ssh pi@$ip "sudo poweroff"
+    Start-Sleep -Seconds 2
+}</pre>
+  </div>
+
+  <div class="callout ok"><span class="callout-icon">★</span><div><strong>Pronto!</strong> Cluster de 6 RPis com renderização 3D distribuída, eleição de líder por Raft, fila de tarefas com recovery, API HTTP em cada nó e visualização em tempo real no browser. Tolerância: até 2 nós podem cair sem perder o quórum Raft, e tarefas órfãs voltam para a fila em menos de 10s.</div></div>
+
+  <button class="mark-done" id="done-15" onclick="markDone(15,this)">✓ Projeto completo!</button>
+  <div class="page-nav">
+    <button class="nav-btn" onclick="go(14)">← anterior</button>
+    <button class="nav-btn" disabled>— fim —</button>
+  </div>
+</div>
+
+</main>
+</div>
+
+<script>
+var cur = 0;
+var TOTAL = 16;
+var done = new Set([0,1,2,3,4,5,6]);
+
+done.forEach(function(i){
+  var el = document.getElementById('nav-'+i);
+  if (el) { el.classList.add('done'); el.querySelector('.sb-num').textContent = '✓'; }
+});
+
+function go(idx) {
+  document.getElementById('p'+cur).classList.remove('active');
+  document.getElementById('nav-'+cur).classList.remove('active');
+  cur = idx;
+  document.getElementById('p'+cur).classList.add('active');
+  document.getElementById('nav-'+cur).classList.add('active');
+  window.scrollTo(0,0);
+}
+
+function markDone(idx, btn) {
+  done.add(idx);
+  btn.textContent = '✓ Concluido';
+  btn.classList.add('done');
+  var nav = document.getElementById('nav-'+idx);
+  nav.classList.add('done');
+  nav.querySelector('.sb-num').textContent = '✓';
+  var pct = Math.round(done.size / TOTAL * 100);
+  document.getElementById('prog-fill').style.width = pct + '%';
+  document.getElementById('prog-pct').textContent = pct + '%';
+}
+</script>
+</body>
+</html>

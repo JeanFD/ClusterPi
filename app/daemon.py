@@ -1,6 +1,9 @@
 """
 Raft daemon: roda em cada nó, mantém estado replicado e elege um líder.
 Só o líder chama gerar_tarefas(). Os outros viram workers passivos.
+
+A geometria ativa é lida da chave Redis {stream}:geometry
+(definida pelo frontend via API). Padrão: "torus".
 """
 import time, signal, sys, logging
 from pysyncobj import SyncObj, SyncObjConf, replicated
@@ -19,7 +22,7 @@ class ClusterState(SyncObj):
         peers = [f"{ip}:{RAFT_PORT}" for ip in NODES if ip != MY_IP]
 
         cfg = SyncObjConf(
-            dynamicMenbershipChange = True,
+            dynamicMembershipChange = True,
             appendEntriesUseBatch = True,
             commandsWaitLeader = True,
             connectionTimeout = 3.5,
@@ -47,6 +50,9 @@ class ClusterState(SyncObj):
         }
     
 def main():
+    log.info(f"[{MY_NAME}] iniciando Raft em {MY_IP}:{RAFT_PORT}")
+    state = ClusterState()
+
     import threading
     from recovery import run as recovery_run
 
@@ -56,8 +62,6 @@ def main():
         daemon=True,
     )
     th.start()
-    log.info(f"[{MY_NAME}] iniciando Raft em {MY_IP}:{RAFT_PORT}")
-    state = ClusterState()
 
     while state._getLeader() is None:
         log.info("aguardando eleição...")
@@ -65,29 +69,40 @@ def main():
 
     log.info(f"lider eleito: {state._getLeader()}")
 
-    from torus import generate_torus_batch
-    import redis
-    r = redis.Redis(host=MY_IP, port=6379, decode_responses=True)
+    from geometry import generate_batch, DEFAULT_GEOMETRY
+    from redis.cluster import RedisCluster
     from config import STREAM_TASKS
 
-    BATCH_SIZE = 200
+    r = RedisCluster(host=MY_IP, port=6379, decode_responses=True)
+
+    BATCH_SIZE = 500
     INTERVAL_S = 0.5
+
+    # Chave Redis onde o frontend define a geometria ativa
+    GEOM_KEY = "{stream}:geometry"
 
     while True:
         try:
             if state._isLeader():
-                batch_id=state.increment_batch(sync=True)
-                points = generate_torus_batch(batch_id, BATCH_SIZE)
+                r.set("{stream}:cluster:leader", MY_IP, ex=5)  # TTL 5s
+
+                # Ler geometria ativa (definida pelo frontend via API)
+                geom = r.get(GEOM_KEY) or DEFAULT_GEOMETRY
+
+                batch_id = state.increment_batch(sync=True)
+                points = generate_batch(geom, batch_id, BATCH_SIZE)
+                
                 pipe = r.pipeline()
                 for p in points:
                     pipe.xadd(STREAM_TASKS, p)
                 pipe.execute()
+                
                 state.add_tasks(BATCH_SIZE, sync=False)
-                log.info(f"[LIDER] batch {batch_id} -> {BATCH_SIZE} tarefas")
+                log.info(f"[LIDER] batch {batch_id} -> {BATCH_SIZE} tarefas ({geom})")
             time.sleep(INTERVAL_S)
         except Exception as e:
             log.error(f"loop error: {e}")
-            time.sleep(2)
+            time.sleep(0.1)
 
 def shutdown(signum, frame):
     log.info("encerrando...")

@@ -1,0 +1,15 @@
+[Unit]
+Description=Cluster RPi - Worker
+After=cluster-daemon.service
+Requires=cluster-daemon.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/cluster/app
+ExecStart=/home/pi/cluster/app/venv/bin/python worker.py
+Restart=always
+RestartSec=2
+
+[Install]
+WantedBy=multi-user.target

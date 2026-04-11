@@ -1,0 +1,15 @@
+[Unit]
+Description=Cluster RPi - FastAPI
+After=network.target
+
+[Service]
+User=pi
+# O caminho completo é vital aqui
+WorkingDirectory=/home/pi/cluster/app
+# Apontamos direto para o python dentro do ambiente virtual
+ExecStart=/home/pi/cluster/app/venv/bin/python -m uvicorn api:app --host 0.0.0.0 --port 8000
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target

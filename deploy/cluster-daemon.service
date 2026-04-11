@@ -1,0 +1,15 @@
+[Unit]
+Description=Cluster RPi - Raft daemon
+After=docker.service network-online.target
+Requires=docker.service
+
+[Service]
+Type=simple
+User=pi
+WorkingDirectory=/home/pi/cluster/app
+ExecStart=/home/pi/cluster/app/venv/bin/python daemon.py
+Restart=always
+RestartSec=3
+
+[Install]
+WantedBy=multi-user.target
