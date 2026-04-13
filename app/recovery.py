@@ -21,7 +21,6 @@ def run(is_leader_fn, stop_fn=lambda: False):
     is_leader_fn: callable que retorna True se este nó é o líder Raft.
     stop_fn:     callable que retorna True para encerrar o loop.
     """
-    # Configuração direta para o Redis-py versão 5+
     r = RedisCluster(host=MY_IP, port=6379, decode_responses=True)
     consumer_id = f"recovery-{MY_NAME}"
     cursor = "0-0"
@@ -46,9 +45,10 @@ def run(is_leader_fn, stop_fn=lambda: False):
                 # Como o `consumer_id` é o recovery, deixamos pendentes
                 # com idle=0 para o próximo XREADGROUP de qualquer worker.
                 # Truque: re-XADD as mesmas tarefas e ACK as antigas.
-                pipe = r.pipeline()
+                # A3: pipeline sem transaction (overhead alto no RedisCluster)
+                pipe = r.pipeline(transaction=False)
                 for msg_id, fields in claimed:
-                    pipe.xadd(STREAM_TASKS, fields)
+                    pipe.xadd(STREAM_TASKS, fields, maxlen=10_000, approximate=True)
                     pipe.xack(STREAM_TASKS, GROUP_NAME, msg_id)
                 pipe.execute()
 

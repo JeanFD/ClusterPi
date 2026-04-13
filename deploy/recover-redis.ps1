@@ -1,131 +1,144 @@
 # deploy/recover-redis.ps1 — Restaura Redis e reinicia o cluster inteiro
 # Uso: .\deploy\recover-redis.ps1
-#
-# O que faz:
-#   1. Copia docker-compose.redis.yml e redis.conf para o nó líder (.20)
-#   2. Cria o diretório /data/redis se não existir
-#   3. Sobe o container Redis via Docker Compose
-#   4. Aguarda o healthcheck do Redis
-#   5. Limpa o rate-limit do systemd em TODOS os nós
-#   6. Reinicia os 3 serviços (daemon, worker, api) em todos os nós
-#   7. Verifica o status final
 
 $ErrorActionPreference = "Continue"
-$leader = "192.168.1.20"
 $nodes  = 20..25
+$leader = "192.168.1.20"
 
-Write-Host "`n╔══════════════════════════════════════════╗" -ForegroundColor Red
-Write-Host "║  Cluster RPi — RECOVERY MODE             ║" -ForegroundColor Red
-Write-Host "╚══════════════════════════════════════════╝`n" -ForegroundColor Red
+Write-Host ""
+Write-Host "===========================================" -ForegroundColor Red
+Write-Host "  Cluster RPi -- RECOVERY MODE" -ForegroundColor Red
+Write-Host "===========================================" -ForegroundColor Red
+Write-Host ""
 
 # ── Step 1: Verificar conectividade SSH ──────────────────────────
-Write-Host "🔍 Verificando conectividade SSH..." -ForegroundColor Cyan
+Write-Host "Verificando conectividade SSH..." -ForegroundColor Cyan
 $reachable = 0
 foreach ($n in $nodes) {
     $ip = "192.168.1.$n"
     $result = ssh -o ConnectTimeout=3 pi@$ip "echo ok" 2>&1
     if ($result -eq "ok") {
-        Write-Host "  ✓ $ip" -ForegroundColor Green
+        Write-Host "  OK $ip" -ForegroundColor Green
         $reachable++
     } else {
-        Write-Host "  ✗ $ip — UNREACHABLE" -ForegroundColor Red
+        Write-Host "  FAIL $ip" -ForegroundColor Red
     }
 }
 if ($reachable -eq 0) {
-    Write-Host "`n❌ Nenhum nó acessível. Verifique a rede." -ForegroundColor Red
+    Write-Host "Nenhum no acessivel. Verifique a rede." -ForegroundColor Red
     exit 1
 }
-Write-Host "  $reachable/$($nodes.Count) nós acessíveis`n" -ForegroundColor Yellow
+Write-Host "  $reachable / 6 nos acessiveis" -ForegroundColor Yellow
 
-# ── Step 2: Restaurar arquivos do Redis no líder ─────────────────
-Write-Host "📦 Restaurando infraestrutura Redis em $leader..." -ForegroundColor Cyan
-
-ssh pi@$leader "mkdir -p ~/cluster/redis"
-scp .\docker-compose.redis.yml pi@${leader}:~/cluster/
-scp .\redis\redis.conf         pi@${leader}:~/cluster/redis/
-
-# Criar diretório de dados
-ssh pi@$leader "sudo mkdir -p /data/redis && sudo chown pi:pi /data/redis"
-Write-Host "  ✓ Arquivos copiados" -ForegroundColor Green
-
-# ── Step 3: Parar container antigo (se existir) e subir novo ────
-Write-Host "`n🚀 Iniciando container Redis..." -ForegroundColor Cyan
-
-ssh pi@$leader @"
-cd ~/cluster
-docker compose -f docker-compose.redis.yml down 2>/dev/null
-docker compose -f docker-compose.redis.yml up -d
-"@
-
-# ── Step 4: Aguardar healthcheck ─────────────────────────────────
-Write-Host "`n⏳ Aguardando Redis responder..." -ForegroundColor Yellow
-$maxWait = 30
-$elapsed = 0
-$redisOk = $false
-
-while ($elapsed -lt $maxWait) {
-    Start-Sleep -Seconds 2
-    $elapsed += 2
-    $pong = ssh pi@$leader "redis-cli ping 2>/dev/null"
-    if ($pong -match "PONG") {
-        $redisOk = $true
-        break
-    }
-    Write-Host "  ... tentando ($elapsed/$maxWait s)" -ForegroundColor DarkYellow
+# ── Step 2: Distribuir redis.conf e docker-compose ───────────────
+Write-Host ""
+Write-Host "Distribuindo redis.conf e docker-compose..." -ForegroundColor Cyan
+foreach ($n in $nodes) {
+    $ip = "192.168.1.$n"
+    ssh pi@$ip "mkdir -p ~/cluster/redis"
+    scp .\docker-compose.redis.yml pi@${ip}:~/cluster/
+    scp .\redis\redis.conf         pi@${ip}:~/cluster/redis/
 }
+Write-Host "  Arquivos distribuidos" -ForegroundColor Green
 
-if (-not $redisOk) {
-    Write-Host "`n❌ Redis não respondeu em ${maxWait}s. Verifique manualmente:" -ForegroundColor Red
-    Write-Host "   ssh pi@$leader 'docker logs cluster-redis-1'" -ForegroundColor Yellow
-    exit 1
-}
+# ── Step 3: Garantir tmpfs + subir Redis em todos os nos ─────────
+Write-Host ""
+Write-Host "Subindo Redis em todos os nos..." -ForegroundColor Cyan
 
-Write-Host "  ✓ Redis PONG — online!" -ForegroundColor Green
-
-# Mostrar info do cluster Redis
-$clusterInfo = ssh pi@$leader "redis-cli cluster info 2>/dev/null | head -3"
-Write-Host "  $clusterInfo" -ForegroundColor DarkGray
-
-# ── Step 5: Reset systemd + restart services em todos os nós ─────
-Write-Host "`n🔄 Reiniciando serviços em todos os nós..." -ForegroundColor Cyan
+$redisCmd = "sudo mkdir -p /data/redis && " +
+            "(mountpoint -q /data/redis || sudo mount -t tmpfs -o size=512M,mode=0755 tmpfs /data/redis); " +
+            "cd ~/cluster && docker compose -f docker-compose.redis.yml down 2>/dev/null; " +
+            "docker compose -f docker-compose.redis.yml up -d"
 
 foreach ($n in $nodes) {
     $ip = "192.168.1.$n"
-    Write-Host "  → $ip" -ForegroundColor Yellow
-    ssh pi@$ip @"
-sudo systemctl reset-failed cluster-daemon cluster-worker cluster-api 2>/dev/null
-sudo systemctl restart cluster-daemon cluster-worker cluster-api
-"@
+    Write-Host "  -> $ip" -ForegroundColor Yellow
+    ssh pi@$ip $redisCmd
 }
 
-# ── Step 6: Aguardar eleição Raft ────────────────────────────────
-Write-Host "`n⏳ Aguardando eleição Raft (12s)..." -ForegroundColor Yellow
+# ── Step 4: Aguardar Redis responder em todos os nos ─────────────
+Write-Host ""
+Write-Host "Aguardando Redis responder (ate 30s)..." -ForegroundColor Yellow
+Start-Sleep -Seconds 5
+
+$allRedisOk = $true
+foreach ($n in $nodes) {
+    $ip = "192.168.1.$n"
+    $ok = $false
+    for ($i = 0; $i -lt 10; $i++) {
+        $pong = ssh pi@$ip "docker exec cluster-redis-1 redis-cli ping 2>/dev/null"
+        if ($pong -match "PONG") { $ok = $true; break }
+        Start-Sleep -Seconds 2
+    }
+    if ($ok) {
+        Write-Host "  OK $ip Redis PONG" -ForegroundColor Green
+    } else {
+        Write-Host "  FAIL $ip Redis nao respondeu" -ForegroundColor Red
+        $allRedisOk = $false
+    }
+}
+
+# ── Step 5: Criar Redis Cluster (6 masters, 0 replicas) ──────────
+Write-Host ""
+Write-Host "Criando Redis Cluster..." -ForegroundColor Cyan
+
+$clusterNodes = (20..25 | ForEach-Object { "192.168.1.$_`:6379" }) -join " "
+$createCmd    = "docker exec cluster-redis-1 redis-cli --cluster create $clusterNodes --cluster-replicas 0 --cluster-yes"
+Write-Host "  $createCmd"
+ssh pi@$leader $createCmd
+
+Start-Sleep -Seconds 3
+
+$clusterState = ssh pi@$leader "docker exec cluster-redis-1 redis-cli cluster info | head -3"
+Write-Host "  $clusterState" -ForegroundColor DarkGray
+
+# ── Step 6: Reiniciar servicos Python em todos os nos ────────────
+Write-Host ""
+Write-Host "Reiniciando servicos Python em todos os nos..." -ForegroundColor Cyan
+
+$restartCmd = "sudo systemctl reset-failed 2>/dev/null || true; " +
+              "sudo systemctl restart cluster-daemon cluster-worker@0 cluster-worker@1 cluster-worker@2 cluster-worker@3 cluster-api"
+
+foreach ($n in $nodes) {
+    $ip = "192.168.1.$n"
+    Write-Host "  -> $ip" -ForegroundColor Yellow
+    ssh pi@$ip $restartCmd
+}
+
+# ── Step 7: Aguardar eleicao Raft ────────────────────────────────
+Write-Host ""
+Write-Host "Aguardando eleicao Raft (12s)..." -ForegroundColor Yellow
 Start-Sleep -Seconds 12
 
-# ── Step 7: Verificar status final ───────────────────────────────
-Write-Host "`n✅ Status final:" -ForegroundColor Green
-Write-Host ("  " + "-" * 50)
+# ── Step 8: Status final ─────────────────────────────────────────
+Write-Host ""
+Write-Host "Status final:" -ForegroundColor Green
+Write-Host ("  " + "-" * 52)
 $allGood = $true
 
 foreach ($n in $nodes) {
     $ip = "192.168.1.$n"
-    $status = ssh pi@$ip "systemctl is-active cluster-daemon cluster-worker cluster-api 2>/dev/null | tr '\n' ' '"
-    
-    if ($status -match "active active active") {
-        Write-Host "  ✓ $ip : $status" -ForegroundColor Green
+    $status = ssh pi@$ip "systemctl is-active cluster-daemon cluster-worker@0 cluster-worker@1 cluster-worker@2 cluster-worker@3 cluster-api 2>/dev/null | tr '\n' ' '"
+    if ($status -match "active active active active active active") {
+        Write-Host "  OK $ip : $status" -ForegroundColor Green
     } else {
-        Write-Host "  ✗ $ip : $status" -ForegroundColor Red
+        Write-Host "  FAIL $ip : $status" -ForegroundColor Red
         $allGood = $false
     }
 }
 
-Write-Host ("  " + "-" * 50)
+Write-Host ("  " + "-" * 52)
 
 if ($allGood) {
-    Write-Host "`n🎉 CLUSTER RECUPERADO COM SUCESSO!" -ForegroundColor Green
-    Write-Host "   Dashboard: abra frontend/index.html" -ForegroundColor Cyan
-    Write-Host "   Watchdog:  python watchdog.py`n" -ForegroundColor Cyan
+    Write-Host ""
+    Write-Host "CLUSTER RECUPERADO COM SUCESSO!" -ForegroundColor Green
+    Write-Host "  Health: .\deploy\api.ps1 -Action health" -ForegroundColor Cyan
+    Write-Host "  Dashboard: abra frontend/index.html" -ForegroundColor Cyan
+    Write-Host ""
 } else {
-    Write-Host "`n⚠ Alguns nós ainda estão com problemas." -ForegroundColor Yellow
-    Write-Host "   Verifique logs: ssh pi@<ip> 'journalctl -u cluster-daemon -n 20 --no-pager'" -ForegroundColor Yellow
+    Write-Host ""
+    Write-Host "Alguns nos ainda tem problemas." -ForegroundColor Yellow
+    Write-Host "  Logs de um no com problema:" -ForegroundColor Yellow
+    Write-Host "  ssh pi@192.168.1.20 journalctl -u cluster-daemon -n 30 --no-pager" -ForegroundColor Yellow
+    Write-Host ""
 }

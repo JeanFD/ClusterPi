@@ -1,5 +1,5 @@
 [Unit]
-Description=Cluster RPi - Worker
+Description=Cluster RPi - Worker %i
 After=cluster-daemon.service
 Requires=cluster-daemon.service
 
@@ -7,6 +7,7 @@ Requires=cluster-daemon.service
 Type=simple
 User=pi
 WorkingDirectory=/home/pi/cluster/app
+Environment=WORKER_ID=%i
 ExecStart=/home/pi/cluster/app/venv/bin/python worker.py
 Restart=always
 RestartSec=2

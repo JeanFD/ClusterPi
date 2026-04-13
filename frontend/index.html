@@ -595,6 +595,9 @@
         <div class="card-badge" id="geom-name-badge">TORUS</div>
       </div>
       <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
+        <button class="ctrl-btn active" style="width:auto; padding: 0 12px; font-size: 11px; height: 32px; background: rgba(52, 211, 153, 0.1); border-color:#34d399; color: #34d399;" onclick="toggleRenderMode()" id="btn-rendermode">MODO: STREAM ANIMADO</button>
+      </div>
+      <div style="display: flex; gap: 8px; flex-wrap: wrap; margin-bottom: 8px;">
         <button class="ctrl-btn" style="width:auto; padding: 0 12px; font-size: 11px; height: 32px;" onclick="switchGeometry('torus')" id="btn-torus">Torus</button>
         <button class="ctrl-btn" style="width:auto; padding: 0 12px; font-size: 11px; height: 32px;" onclick="switchGeometry('lorenz')" id="btn-lorenz">Lorenz</button>
         <button class="ctrl-btn" style="width:auto; padding: 0 12px; font-size: 11px; height: 32px;" onclick="switchGeometry('mandelbulb')" id="btn-mandelbulb">Mandelbulb</button>
@@ -731,49 +734,63 @@ scene.add(light3);
 //  PARTICLE SYSTEM PER WORKER
 // ═══════════════════════════════════════════════
 
-const MAX_POINTS_PER_WORKER = 6000;
+let MAX_POINTS_PER_WORKER = 6000;
 const workerGroups = {};
+let isRenderMode = false;
+let lastStreamId = "0-0";
+let totalRenderedPoints = 0;
 
-NODES_CONFIG.forEach((node, idx) => {
-  const positions = new Float32Array(MAX_POINTS_PER_WORKER * 3);
-  const colors = new Float32Array(MAX_POINTS_PER_WORKER * 3);
-  const sizes = new Float32Array(MAX_POINTS_PER_WORKER);
-
-  const color = new THREE.Color(node.color);
-
-  for (let i = 0; i < MAX_POINTS_PER_WORKER; i++) {
-    colors[i * 3] = color.r;
-    colors[i * 3 + 1] = color.g;
-    colors[i * 3 + 2] = color.b;
-    sizes[i] = 0.03 + Math.random() * 0.04;
+function initWorkerGroups(maxPoints) {
+  // Limpar os antigos
+  for (const k in workerGroups) {
+    if (workerGroups[k].points) {
+      scene.remove(workerGroups[k].points);
+      workerGroups[k].geo.dispose();
+      workerGroups[k].points.material.dispose();
+    }
   }
 
-  const geo = new THREE.BufferGeometry();
-  geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
-  geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
-  geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+  MAX_POINTS_PER_WORKER = maxPoints;
 
-  const mat = new THREE.PointsMaterial({
-    size: 0.04,
-    vertexColors: true,
-    transparent: true,
-    opacity: 0.55,
-    blending: THREE.AdditiveBlending,
-    depthWrite: false,
-    sizeAttenuation: true,
+  NODES_CONFIG.forEach((node, idx) => {
+    const positions = new Float32Array(MAX_POINTS_PER_WORKER * 3);
+    const colors = new Float32Array(MAX_POINTS_PER_WORKER * 3);
+    const sizes = new Float32Array(MAX_POINTS_PER_WORKER);
+
+    const color = new THREE.Color(node.color);
+
+    for (let i = 0; i < MAX_POINTS_PER_WORKER; i++) {
+      colors[i * 3] = color.r;
+      colors[i * 3 + 1] = color.g;
+      colors[i * 3 + 2] = color.b;
+      sizes[i] = 0.03 + Math.random() * 0.04;
+    }
+
+    const geo = new THREE.BufferGeometry();
+    geo.setAttribute('position', new THREE.BufferAttribute(positions, 3));
+    geo.setAttribute('color', new THREE.BufferAttribute(colors, 3));
+    geo.setAttribute('size', new THREE.BufferAttribute(sizes, 1));
+    
+    const mat = new THREE.PointsMaterial({
+      size: isRenderMode ? 0.012 : 0.04,
+      vertexColors: true,
+      transparent: true,
+      opacity: isRenderMode ? 0.04 : 0.55,
+      blending: THREE.AdditiveBlending,
+      depthWrite: false,
+      sizeAttenuation: true,
+    });
+
+    const points = new THREE.Points(geo, mat);
+    scene.add(points);
+
+    workerGroups[node.name] = {
+      points, geo, positions, count: 0, taskCount: 0,
+    };
   });
+}
 
-  const points = new THREE.Points(geo, mat);
-  scene.add(points);
-
-  workerGroups[node.name] = {
-    points,
-    geo,
-    positions,
-    count: 0,
-    taskCount: 0,
-  };
-});
+initWorkerGroups(6000);
 
 // ═══════════════════════════════════════════════
 //  WIREFRAME MESH (reference shape)
@@ -1028,20 +1045,42 @@ function simulateFrame(delta) {
 
 let nodeIdx = 0;
 let lastPollPoints = 0;
+let lastProcessedTotal = undefined;
+let lastProcessedTime = performance.now();
+let clusterNodeStatus = [];
 
 async function pollCluster() {
-  const nodeConfig = NODES_CONFIG[nodeIdx++ % NODES_CONFIG.length];
+  if (clusterNodeStatus.length !== NODES_CONFIG.length) {
+    clusterNodeStatus = new Array(NODES_CONFIG.length).fill(false);
+  }
+  const currNodeIdx = nodeIdx++ % NODES_CONFIG.length;
+  const nodeConfig = NODES_CONFIG[currNodeIdx];
   try {
     const controller = new AbortController();
-    const timeout = setTimeout(() => controller.abort(), 2000);
-    
-    const res = await fetch(`http://${nodeConfig.ip}:8000/results/recent?limit=15000`, {
-      signal: controller.signal
-    });
+    const timeout = setTimeout(() => controller.abort(), 1500);
+
+    // Sempre usa stream (acumulativo) — tanto em modo geometry quanto render
+    const limit = isRenderMode ? 12000 : 15000;
+    const res = await fetch(
+      `http://${nodeConfig.ip}:8000/results/stream?last_id=${lastStreamId}&limit=${limit}`,
+      { signal: controller.signal }
+    );
+
     clearTimeout(timeout);
     const data = await res.json();
-    
-    if (!data.points || data.points.length === 0) return;
+
+    if (data.last_id && data.last_id !== lastStreamId) lastStreamId = data.last_id;
+
+    if (!data.points || data.points.length === 0) {
+      clusterNodeStatus[currNodeIdx] = true;  // nó online mesmo sem novos pontos
+      if (!isClusterOnline) {
+        isClusterOnline = true;
+        updateConnectionStatus();
+      }
+      // atualiza UI sem alterar pontos
+      updateUI(Object.values(workerGroups).reduce((s, g) => s + g.count, 0));
+      return;
+    }
 
     // Mark cluster as online
     if (!isClusterOnline) {
@@ -1049,11 +1088,7 @@ async function pollCluster() {
       updateConnectionStatus();
     }
 
-    // Clear buffers
-    for (const k in workerGroups) {
-      workerGroups[k].count = 0;
-      workerGroups[k].taskCount = 0;
-    }
+    // NÃO limpa buffers a cada poll — pontos acumulam até encher o buffer
 
     // Fill buffers from cluster data
     for (const p of data.points) {
@@ -1065,6 +1100,7 @@ async function pollCluster() {
       group.positions[i + 2] = p.z;
       group.count++;
       group.taskCount++;
+      if (isRenderMode) totalRenderedPoints++;
     }
 
     let totalPoints = 0;
@@ -1075,20 +1111,51 @@ async function pollCluster() {
       totalPoints += group.count;
     }
 
-    // Get leader info
     try {
       const hRes = await fetch(`http://${nodeConfig.ip}:8000/health`, {
         signal: AbortSignal.timeout(1500)
       });
       const h = await hRes.json();
       document.getElementById('leader-badge').textContent = `Líder: ${h.leader || '?'}`;
-    } catch(e) {}
-
-    lastPollPoints = totalPoints;
-    updateUI(totalPoints);
+      const tempId = (nodeIdx - 1) % NODES_CONFIG.length;
+      const tEl = document.getElementById(`node-temp-${tempId}`);
+      if (tEl && h.temp !== null && h.temp !== undefined) {
+        tEl.textContent = `${h.temp.toFixed(1)}ºC`;
+      }
+      
+      const qRes = await fetch(`http://${nodeConfig.ip}:8000/queue/status`, {
+        signal: AbortSignal.timeout(1500)
+      });
+      const q = await qRes.json();
+      const realTotalPoints = q.processed_total || totalPoints;
+      
+      const now = performance.now();
+      if (lastProcessedTotal !== undefined) {
+        const deltaPoints = realTotalPoints - lastProcessedTotal;
+        const deltaSec = (now - lastProcessedTime) / 1000;
+        if (deltaSec > 0.5 && deltaPoints >= 0) {
+            simPointsPerSec = Math.round(deltaPoints / deltaSec);
+            lastProcessedTime = now;
+            lastProcessedTotal = realTotalPoints;
+        }
+      } else {
+        lastProcessedTotal = realTotalPoints;
+        lastProcessedTime = now;
+      }
+      
+      lastPollPoints = realTotalPoints;
+      clusterNodeStatus[currNodeIdx] = true;
+      updateUI(realTotalPoints);
+    } catch(e) {
+      clusterNodeStatus[currNodeIdx] = false;
+      lastPollPoints = totalPoints;
+      updateUI(totalPoints);
+    }
 
   } catch(e) {
     // Node offline
+    clusterNodeStatus[currNodeIdx] = false;
+    updateUI(lastPollPoints);
   }
 }
 
@@ -1135,7 +1202,9 @@ function formatNumber(n) {
 function updateUI(totalPoints) {
   document.getElementById('points-display').textContent = formatNumber(totalPoints);
   document.getElementById('stat-pps').textContent = formatNumber(simPointsPerSec);
-  document.getElementById('stat-nodes').innerHTML = `6<span class="stat-unit">/6</span>`;
+  
+  const onlineCount = clusterNodeStatus.length > 0 ? Object.values(clusterNodeStatus).filter(s => s).length : 0;
+  document.getElementById('stat-nodes').innerHTML = `${onlineCount}<span class="stat-unit">/${NODES_CONFIG.length}</span>`;
   document.getElementById('stat-throughput').innerHTML = `${formatNumber(Math.round(simPointsPerSec / 6))}<span class="stat-unit">t/s</span>`;
   document.getElementById('stat-latency').innerHTML = `${Math.round(2 + Math.random() * 5)}<span class="stat-unit">ms</span>`;
 
@@ -1167,7 +1236,10 @@ function buildNodeList() {
       <div class="node-color" style="color:${hex}; background:${hex}"></div>
       <div class="node-info">
         <div class="node-name">${node.name}${isLeader ? ' ★' : ''}</div>
-        <div class="node-ip">${node.ip}</div>
+        <div class="node-ip">
+          ${node.ip}
+          <span id="node-temp-${idx}" style="color:var(--amber); margin-left: 6px; font-weight: 500;"></span>
+        </div>
       </div>
       <div class="node-tasks" id="node-tasks-${idx}">0</div>
       <div class="node-bar-wrap">
@@ -1265,31 +1337,59 @@ window.switchGeometry = function(type) {
   document.getElementById('geom-name-badge').textContent = type.toUpperCase();
 
   // Update active button
-  document.querySelectorAll('[id^="btn-"]').forEach(b => b.classList.remove('active'));
+  document.querySelectorAll('[id^="btn-"]').forEach(b => {
+      // ignore rendermode toggle
+      if (b.id !== 'btn-rendermode') b.classList.remove('active');
+  });
   const btn = document.getElementById(`btn-${type}`);
   if (btn) btn.classList.add('active');
 
   createWireframe(type);
 
   // Reset particle buffers
+  lastStreamId = "0-0";
+  totalRenderedPoints = 0;
   for (const k in workerGroups) {
     workerGroups[k].count = 0;
+    workerGroups[k].taskCount = 0;
     workerGroups[k].geo.setDrawRange(0, 0);
   }
 
-  // Se o cluster está online, avisar a API para trocar a geometria no backend
   if (isClusterOnline) {
     const node = NODES_CONFIG[0];
     fetch(`http://${node.ip}:8000/geometry`, {
       method: 'POST',
       headers: { 'Content-Type': 'application/json' },
-      body: JSON.stringify({ geometry: type }),
+      body: JSON.stringify({ geometry: type, render_mode: isRenderMode }),
     }).then(r => r.json()).then(d => {
-      console.log('Geometria do cluster alterada:', d);
+      console.log('Geometria alterada:', d);
     }).catch(e => {
-      console.warn('Falha ao trocar geometria no cluster:', e);
+      console.warn('Falha:', e);
     });
   }
+};
+
+window.toggleRenderMode = function() {
+  isRenderMode = !isRenderMode;
+  const btn = document.getElementById('btn-rendermode');
+  if (isRenderMode) {
+    btn.classList.add('active');
+    btn.textContent = 'MODO: ACUMULAÇÃO RENDER (STATICO)';
+    btn.style.color = '#fff';
+    btn.style.background = '#8b5cf6';
+    btn.style.borderColor = '#8b5cf6';
+    initWorkerGroups(800000); // 4.8 million points total
+  } else {
+    btn.classList.add('active'); // active design indicates ON state, wait, live string:
+    btn.textContent = 'MODO: STREAM ANIMADO';
+    btn.style.background = 'rgba(52, 211, 153, 0.1)';
+    btn.style.color = '#34d399';
+    btn.style.borderColor = '#34d399';
+    initWorkerGroups(6000);
+  }
+  
+  if (wireframeMesh) wireframeMesh.visible = !isRenderMode;
+  switchGeometry(currentGeometry);
 };
 
 // Default active
