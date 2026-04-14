@@ -1,7 +1,8 @@
 """
 Recovery loop: usa XAUTOCLAIM para tomar mensagens cujo consumer
-não fez ACK em PENDING_TIMEOUT_MS. Roda APENAS no líder Raft —
-assim evitamos múltiplos recoveries simultâneos competindo.
+não fez ACK em PENDING_TIMEOUT_MS. Roda em TODOS os nós — XAUTOCLAIM
+é atômico no Redis, então múltiplos recoveries concorrentes são seguros
+e garantem que a queda do líder não pare o reclaim de tiles órfãs.
 """
 import time, logging
 import redis
@@ -16,9 +17,10 @@ logging.basicConfig(level=logging.INFO,
 log = logging.getLogger("recovery")
 
 
-def run(is_leader_fn, stop_fn=lambda: False):
+def run(is_leader_fn=None, stop_fn=lambda: False):
     """
-    is_leader_fn: callable que retorna True se este nó é o líder Raft.
+    is_leader_fn: mantido por compatibilidade, não é mais usado (recovery
+                  roda em todos os nós agora).
     stop_fn:     callable que retorna True para encerrar o loop.
     """
     r = RedisCluster(host=MY_IP, port=6379, decode_responses=True)
@@ -27,11 +29,6 @@ def run(is_leader_fn, stop_fn=lambda: False):
 
     while not stop_fn():
         try:
-            if not is_leader_fn():
-                time.sleep(2)
-                cursor = "0-0"
-                continue
-
             # XAUTOCLAIM <key> <group> <consumer> <min-idle-ms> <start>
             cursor, claimed, _ = r.xautoclaim(
                 STREAM_TASKS, GROUP_NAME, consumer_id,
@@ -52,11 +49,11 @@ def run(is_leader_fn, stop_fn=lambda: False):
                     pipe.xack(STREAM_TASKS, GROUP_NAME, msg_id)
                 pipe.execute()
 
-            time.sleep(2)
+            time.sleep(1)
 
         except Exception as e:
             log.error(f"loop error: {e}")
-            time.sleep(3)
+            time.sleep(2)
 
 
 if __name__ == "__main__":

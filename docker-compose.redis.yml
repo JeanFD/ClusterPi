@@ -1,15 +1,69 @@
 version: "3.9"
+
+# Topologia: 6 masters × 2 replicas. Cada nó roda 3 instâncias:
+#   - redis-a (port 6379): master do slot do próprio nó
+#   - redis-b (port 6380): replica do master do nó (i-1)%6  (vizinho anterior)
+#   - redis-c (port 6381): replica do master do nó (i-2)%6  (dois antes)
+# Anel com offsets +1 e +2: qualquer 2 nós caindo, todo master tem
+# ao menos 1 replica viva em host diferente → failover continua funcionando.
+
 services:
-  redis:
+  redis-a:
     image: redis:7-alpine
+    container_name: cluster-redis-a
     restart: always
     network_mode: host
-    command: redis-server /etc/redis/redis.conf
+    command: >
+      redis-server /etc/redis/redis.conf
+      --port 6379
+      --dir /data/redis-a
+      --cluster-config-file nodes.conf
+      --pidfile /data/redis-a/redis.pid
     volumes:
       - ./redis/redis.conf:/etc/redis/redis.conf:ro
-      - /data/redis:/data/redis
+      - /data/redis-a:/data/redis-a
     healthcheck:
-      test: ["CMD", "redis-cli", "ping"]
+      test: ["CMD", "redis-cli", "-p", "6379", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-b:
+    image: redis:7-alpine
+    container_name: cluster-redis-b
+    restart: always
+    network_mode: host
+    command: >
+      redis-server /etc/redis/redis.conf
+      --port 6380
+      --dir /data/redis-b
+      --cluster-config-file nodes.conf
+      --pidfile /data/redis-b/redis.pid
+    volumes:
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
+      - /data/redis-b:/data/redis-b
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6380", "ping"]
+      interval: 5s
+      timeout: 3s
+      retries: 5
+
+  redis-c:
+    image: redis:7-alpine
+    container_name: cluster-redis-c
+    restart: always
+    network_mode: host
+    command: >
+      redis-server /etc/redis/redis.conf
+      --port 6381
+      --dir /data/redis-c
+      --cluster-config-file nodes.conf
+      --pidfile /data/redis-c/redis.pid
+    volumes:
+      - ./redis/redis.conf:/etc/redis/redis.conf:ro
+      - /data/redis-c:/data/redis-c
+    healthcheck:
+      test: ["CMD", "redis-cli", "-p", "6381", "ping"]
       interval: 5s
       timeout: 3s
       retries: 5

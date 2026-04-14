@@ -15,6 +15,7 @@ Uso:
 """
 import argparse
 import math
+import signal
 import subprocess
 import sys
 import time
@@ -58,12 +59,14 @@ def camera_for_frame(frame_idx: int, total_frames: int,
 
 CLUSTER_IPS = [f"192.168.1.{i}" for i in range(20, 26)]
 
-def find_leader(timeout: float = 5.0) -> Optional[str]:
+def find_leader(timeout: float = 1.5, exclude: Optional[str] = None) -> Optional[str]:
     """
-    Pergunta ao nó .20 (ou outros em sequência) quem é o líder.
-    Retorna o IP do líder ou None.
+    Pergunta a cada nó quem é o líder. Pula o IP `exclude` (útil quando
+    acabamos de descobrir que ele está morto). Retorna o IP do líder ou None.
     """
     for ip in CLUSTER_IPS:
+        if ip == exclude:
+            continue
         try:
             r = requests.get(f"http://{ip}:8000/health", timeout=timeout)
             data = r.json()
@@ -77,6 +80,30 @@ def find_leader(timeout: float = 5.0) -> Optional[str]:
 
 def api_url(leader_ip: str, path: str) -> str:
     return f"http://{leader_ip}:8000{path}"
+
+
+def abort_cluster_render(leader_ip: Optional[str]) -> None:
+    """
+    Chama /render/abort em qualquer nó do cluster para resetar estado residual
+    (modo=geometry, apaga job/current/tasks, libera workers presos).
+    Tenta no líder conhecido, depois nos outros nós.
+    """
+    tried = set()
+    if leader_ip:
+        tried.add(leader_ip)
+        try:
+            requests.post(api_url(leader_ip, "/render/abort"), timeout=2)
+            return
+        except Exception:
+            pass
+    for ip in CLUSTER_IPS:
+        if ip in tried:
+            continue
+        try:
+            requests.post(api_url(ip, "/render/abort"), timeout=2)
+            return
+        except Exception:
+            continue
 
 
 # ═══════════════════════════════════════════════
@@ -156,6 +183,20 @@ def main():
         use_display=not args.no_display,
     )
 
+    # Handler de Ctrl+C: aborta no cluster antes de sair, pra não deixar
+    # estado residual (modo=render, tiles órfãs no PEL, job pendente).
+    aborted = {"v": False}
+    def _on_sigint(sig, frame):
+        if aborted["v"]:
+            # Segundo Ctrl+C → hard exit
+            print("\n⚠ forçando saída sem limpar")
+            sys.exit(130)
+        aborted["v"] = True
+        print("\n🛑 Ctrl+C recebido — abortando render no cluster...")
+        abort_cluster_render(leader_ip)
+        print("   /render/abort enviado. Fechando janela...")
+    signal.signal(signal.SIGINT, _on_sigint)
+
     t_movie_start     = time.time()
     frame_times: List[float] = []
 
@@ -193,14 +234,28 @@ def main():
             "tile_size": args.tile_size,
             "time":      time_val,
         }
-        try:
-            resp = requests.post(api_url(leader_ip, "/render/job"),
-                                 json=job, timeout=10)
-            data = resp.json()
-            tiles_total = data.get("tiles_total", 0)
-            print(f"   Job submetido: {tiles_total} tiles")
-        except Exception as e:
-            print(f"   ⚠ Erro ao submeter job: {e}")
+        # Submeter com retry: se o líder morreu, re-detecta e tenta de novo.
+        tiles_total = 0
+        submitted = False
+        for attempt in range(6):
+            try:
+                resp = requests.post(api_url(leader_ip, "/render/job"),
+                                     json=job, timeout=4)
+                data = resp.json()
+                tiles_total = data.get("tiles_total", 0)
+                print(f"   Job submetido: {tiles_total} tiles (líder: {leader_ip})")
+                submitted = True
+                break
+            except Exception as e:
+                print(f"   ⚠ Falha no líder {leader_ip} ({attempt+1}/6): {e}")
+                new_leader = find_leader(exclude=leader_ip)
+                if new_leader and new_leader != leader_ip:
+                    print(f"   🔄 Novo líder detectado: {new_leader}")
+                    leader_ip = new_leader
+                else:
+                    time.sleep(1.5)  # aguarda eleição Raft
+        if not submitted:
+            print(f"   ⚠ Desistindo do frame {frame_id} após 6 tentativas")
             continue
 
         # Compositar este frame reutilizando a janela/sessão única
@@ -220,8 +275,16 @@ def main():
         frame_times.append(t_frame_elapsed)
         print(f"   Frame salvo em {output_path} ({t_frame_elapsed:.1f}s)")
 
+        if aborted["v"]:
+            break
+
     # Fechar janela do compositor
     close_session(sess)
+
+    # Se foi abortado, já limpamos no handler — pula ffmpeg.
+    if aborted["v"]:
+        print("\n⚠ Render abortado pelo usuário. Frames parciais em", frames_dir)
+        return
 
     # Voltar para modo geometry
     print("\n🔄 Voltando cluster para modo geometry...")

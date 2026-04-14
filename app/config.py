@@ -23,4 +23,4 @@ STREAM_TASKS = "{stream}:tasks"
 STREAM_RESULTS = "{stream}:results"
 GROUP_NAME = "cluster-workers"
 
-PENDING_TIMEOUT_MS = 10_000
+PENDING_TIMEOUT_MS = 3_000

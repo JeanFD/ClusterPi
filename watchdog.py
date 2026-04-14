@@ -33,23 +33,44 @@ try:
         q = queue(up[0]["ip"]) if up else {}
 
         clear()
-        print(f"┌{'─'*54}┐")
-        print(f"│  Cluster RPi v2 — {time.strftime('%H:%M:%S')}   ({len(up)}/{len(NODES)} online){' '*8}│")
-        print(f"├{'─'*54}┤")
+        W = 62
+        def fmt_temp(t):
+            if t is None: return "  -  "
+            if t >= 75:   c = "\033[31m"   # vermelho
+            elif t >= 65: c = "\033[33m"   # amarelo
+            else:         c = "\033[32m"   # verde
+            return f"{c}{t:>4.1f}°C\033[0m"
+
+        print(f"┌{'─'*W}┐")
+        print(f"│  Cluster RPi v2 — {time.strftime('%H:%M:%S')}   ({len(up)}/{len(NODES)} online){' '*(W-44)}│")
+        print(f"├{'─'*W}┤")
         for r in rows:
             if r["online"]:
-                star = "★" if r.get("is_leader") else " "
+                star  = "★" if r.get("is_leader") else " "
                 color = "\033[32m" if r.get("status") == "ok" else "\033[33m"
-                print(f"│ {color}✓\033[0m {r['ip']:<14} {star} {r['node']:<8} "
-                      f"redis={r.get('redis','?'):<4} up={r.get('uptime_s',0):>5}s │")
+                temp  = fmt_temp(r.get("temp"))
+                # sem códigos de cor: ✓ ip star node redis up temp
+                plain_len = 4 + 14 + 3 + 9 + 9 + 10 + 9  # aproximação visual
+                line = (f" {color}✓\033[0m {r['ip']:<14} {star} {r['node']:<8} "
+                        f"redis={r.get('redis','?'):<4} up={r.get('uptime_s',0):>5}s "
+                        f"t={temp}")
+                pad = W - (1+1+1+14+1+1+1+8+1+10+1+8+1+2+7)
+                print(f"│{line}{' '*max(0,pad)}│")
             else:
-                print(f"│ \033[31m✗\033[0m {r['ip']:<14}    OFFLINE{' '*22}│")
-        print(f"├{'─'*54}┤")
+                print(f"│ \033[31m✗\033[0m {r['ip']:<14}    OFFLINE{' '*(W-25)}│")
+        print(f"├{'─'*W}┤")
         if q:
-            print(f"│  fila: {q.get('stream_length',0):>6}   pendentes: {q.get('pending',0):>5}{' '*15}│")
+            line = f"  fila: {q.get('stream_length',0):>6}   pendentes: {q.get('pending',0):>5}"
+            print(f"│{line}{' '*(W-len(line))}│")
         if leaders:
-            print(f"│  líder: {leaders[0]['ip']}{' '*30}│")
-        print(f"└{'─'*54}┘")
+            line = f"  líder: {leaders[0]['ip']}"
+            print(f"│{line}{' '*(W-len(line))}│")
+        if up:
+            temps = [r.get("temp") for r in up if r.get("temp") is not None]
+            if temps:
+                line = f"  temp média: {sum(temps)/len(temps):.1f}°C   max: {max(temps):.1f}°C"
+                print(f"│{line}{' '*(W-len(line))}│")
+        print(f"└{'─'*W}┘")
 
         if   len(leaders) == 0: print("\033[31m⚠ ALERTA: nenhum líder eleito!\033[0m")
         elif len(leaders) > 1:  print(f"\033[31m⚠ SPLIT-BRAIN: {len(leaders)} líderes!\033[0m")

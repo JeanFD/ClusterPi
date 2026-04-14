@@ -297,6 +297,25 @@ def submit_render_job(req: RenderJobRequest):
         return {"error": str(e)}
 
 
+@app.post("/render/abort")
+def abort_render():
+    """
+    Aborta qualquer render em andamento e limpa estado residual.
+    - Volta o cluster para modo geometry
+    - Remove job e frame corrente do Redis
+    - Apaga a stream de tasks (remove PEL junto, liberando workers)
+
+    Usado por render_movie.py quando o usuário cancela (Ctrl+C) ou
+    manualmente via curl/Invoke-RestMethod.
+    """
+    try:
+        r.set(MODE_KEY, "geometry")
+        r.delete(JOB_KEY, CURR_KEY, STREAM_TASKS)
+        return {"status": "ok", "mode": "geometry"}
+    except Exception as e:
+        return {"error": str(e)}
+
+
 @app.get("/render/progress")
 def render_progress():
     """

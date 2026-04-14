@@ -71,6 +71,10 @@ def write_loop(r, out_queue):
                         render_done_counts[fid] = render_done_counts.get(fid, 0) + 1
             for fid, n in render_done_counts.items():
                 pipe.incrby(f"{{stream}}:render:done:{fid}", n)
+            # Contador por-nó de tarefas processadas (usado pelo compositor
+            # para mostrar quanto cada nó trabalhou).
+            if results:
+                pipe.incrby(f"{{stream}}:stats:proc:{MY_NAME}", len(results))
             pipe.xack(STREAM_TASKS, GROUP_NAME, *ack_ids)
             pipe.execute()
             if results:

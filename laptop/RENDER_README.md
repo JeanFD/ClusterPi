@@ -96,13 +96,7 @@ Ao completar todos os tiles, salva `frame_0001.png` e fecha.
 
 ```bash
 # 5 segundos a 24fps = 120 frames, cena mandelbulb, tiles de 64px
-python laptop/render_movie.py \
-    --scene mandelbulb \
-    --frames 120 \
-    --fps 24 \
-    --width 640 \
-    --height 360 \
-    --tile-size 64
+python laptop/render_movie.py --scene mandelbulb --frames 120 --fps 24 --width 640 --height 360 --tile-size 64
 
 # Sem janela pygame (headless, ideal para SSH)
 python laptop/render_movie.py --scene menger --frames 60 --no-display

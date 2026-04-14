@@ -1,5 +1,6 @@
-# deploy/setup-tmpfs.ps1 — Configura tmpfs em /data/redis em todos os nós
-# A6: Redis em tmpfs elimina latência de I/O de disco
+# deploy/setup-tmpfs.ps1 — Configura tmpfs em /data/redis-{a,b,c}
+# Redis em tmpfs elimina latência de I/O de disco. Três instâncias por nó
+# (1 master + 2 replicas de vizinhos) → 3 mounts, 256M cada (768M por nó).
 # Uso: .\deploy\setup-tmpfs.ps1
 # Ou para nós específicos: .\deploy\setup-tmpfs.ps1 -Nodes 20,21,22
 
@@ -9,23 +10,36 @@ param(
 
 $ErrorActionPreference = "Continue"
 
-Write-Host "`n╔══════════════════════════════════════════╗" -ForegroundColor Blue
-Write-Host "║  Cluster RPi — Setup tmpfs Redis         ║" -ForegroundColor Blue
-Write-Host "╚══════════════════════════════════════════╝`n" -ForegroundColor Blue
+Write-Host ""
+Write-Host "=== Cluster RPi - Setup tmpfs (redis-a + redis-b + redis-c) ===" -ForegroundColor Blue
+Write-Host ""
 
-# Comando bash montado em variável — evita problemas com heredoc indentado
-$bashCmd = 'sudo mkdir -p /data/redis && ' +
-           'sudo umount /data/redis 2>/dev/null || true; ' +
-           'sudo mount -t tmpfs -o size=512M,mode=0755 tmpfs /data/redis && ' +
-           'grep -q "tmpfs /data/redis" /etc/fstab || ' +
-           'echo "tmpfs /data/redis tmpfs size=512M,mode=0755 0 0" | sudo tee -a /etc/fstab && ' +
-           'echo "tmpfs configurado em /data/redis" && ' +
-           'df -h /data/redis'
+# Monta /data/redis-a e /data/redis-b (idempotente).
+# Remove o antigo /data/redis do fstab se existir (sem remover o mount ativo
+# para não quebrar um cluster já rodando).
+$bashCmd = @'
+set -e
+for suf in a b c; do
+  d="/data/redis-$suf"
+  sudo mkdir -p "$d"
+  if ! mountpoint -q "$d"; then
+    sudo mount -t tmpfs -o size=256M,mode=0755 tmpfs "$d"
+  fi
+  grep -q "tmpfs $d " /etc/fstab || \
+    echo "tmpfs $d tmpfs size=256M,mode=0755 0 0" | sudo tee -a /etc/fstab > /dev/null
+done
+
+# Limpa entrada legada do /data/redis (não remove o mount ao vivo)
+sudo sed -i '\|^tmpfs /data/redis |d' /etc/fstab || true
+
+echo "tmpfs OK em /data/redis-{a,b,c}"
+df -h /data/redis-a /data/redis-b /data/redis-c
+'@
 
 $jobs = @()
 foreach ($n in $Nodes) {
     $ip = "192.168.1.$n"
-    Write-Host "  → Configurando tmpfs em $ip" -ForegroundColor Yellow
+    Write-Host "  -> Configurando tmpfs em $ip" -ForegroundColor Yellow
 
     $jobs += Start-Job -ScriptBlock {
         param($addr, $cmd)
@@ -37,6 +51,7 @@ Wait-Job $jobs | Out-Null
 Receive-Job $jobs
 Remove-Job  $jobs
 
-Write-Host "`n✅ tmpfs configurado em todos os nós." -ForegroundColor Green
-Write-Host "   Lembre-se: após reboot o Redis precisará re-inicializar o cluster." -ForegroundColor Yellow
-Write-Host "   Use .\deploy\recover-redis.ps1 se necessário.`n"
+Write-Host ""
+Write-Host "tmpfs configurado em todos os nos." -ForegroundColor Green
+Write-Host "   Apos reboot, rode .\deploy\recover-redis.ps1 para reiniciar o cluster Redis." -ForegroundColor Yellow
+Write-Host ""
