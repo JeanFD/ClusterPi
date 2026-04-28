@@ -1,27 +1,27 @@
 """
-Worker: lê {stream}:tasks via consumer group, processa, escreve em {stream}:results.
-Usa o nome do nó + WORKER_ID como consumer-id para suporte a multiprocessing.
+Worker: lê tasks das 6 streams sharded via consumer group, processa,
+escreve resultados na stream correspondente ({sN}:results para tasks
+vindas de {sN}:tasks). Cada worker tem 6 fetch threads (uma por shard)
+que empurram para uma in_queue compartilhada marcada com o shard.
 
-Despacha automaticamente para a geometria correta baseado no campo
-'geom' de cada tarefa (vem do daemon/líder), ou para o render tile worker
-se mode == "render".
+Usa o nome do nó + WORKER_ID como consumer-id para suporte a multiprocessing.
 """
 
-import os, time, json, logging, signal, sys
+import os, time, logging, signal, sys
 import threading
 import queue
 import redis
 from redis.cluster import RedisCluster
 from config import (
     MY_IP, MY_NAME, REDIS_PORT,
-    STREAM_TASKS, STREAM_RESULTS, GROUP_NAME,
+    SHARDS, TASK_KEYS, RESULT_KEYS, GROUP_NAME,
+    ctrl_stats_key, ctrl_done_key,
 )
 from geometry import process_batch, process_point
 
 logging.basicConfig(level=logging.INFO,
     format="%(asctime)s [%(levelname)s] %(message)s")
 
-# A1: ler WORKER_ID injetado pelo systemd template (cluster-worker@N)
 WORKER_ID = os.environ.get("WORKER_ID", "0")
 CONSUMER  = f"{MY_NAME}-w{WORKER_ID}"
 
@@ -30,75 +30,91 @@ log = logging.getLogger(f"worker-{CONSUMER}")
 
 def connect():
     r = RedisCluster(host=MY_IP, port=6379, decode_responses=True)
-    # Garante o group (idempotente — erro BUSYGROUP é esperado)
-    # Usa id="0" para que após restart os workers vejam tasks pendentes na fila
-    # (id="$" faria os workers ignorarem tasks antigas, deixando fila acumular)
-    try:
-        r.xgroup_create(STREAM_TASKS, GROUP_NAME, id="0", mkstream=True)
-    except redis.ResponseError as e:
-        if "BUSYGROUP" not in str(e):
-            raise
+    # Garante grupo em cada shard (idempotente — BUSYGROUP é esperado)
+    for key in TASK_KEYS:
+        try:
+            r.xgroup_create(key, GROUP_NAME, id="0", mkstream=True)
+        except redis.ResponseError as e:
+            if "BUSYGROUP" not in str(e):
+                log.warning(f"xgroup_create {key}: {e}")
     return r
 
 
-def fetch_loop(r, consumer, in_queue):
+def fetch_loop(r, consumer, shard_idx, in_queue):
+    """Uma thread por shard: XREADGROUP da shard {sN}:tasks."""
+    task_key = TASK_KEYS[shard_idx]
     while True:
         try:
-            # A2: count=200, block=1000
-            resp = r.xreadgroup(GROUP_NAME, consumer, {STREAM_TASKS: ">"}, count=200, block=1000)
+            resp = r.xreadgroup(GROUP_NAME, consumer, {task_key: ">"},
+                                count=200, block=1000)
             if resp:
-                in_queue.put(resp[0][1])
+                in_queue.put((shard_idx, resp[0][1]))
         except Exception as e:
-            log.error(f"fetch_loop erro: {e}")
+            log.error(f"fetch_loop[s{shard_idx}] erro: {e}")
             time.sleep(1)
 
 
 def write_loop(r, out_queue):
+    """
+    Uma thread global de escrita. Recebe (shard_idx, ack_ids, results, label).
+    Pipeline cross-slot: redis-py roteia XADD (shard), XACK (shard) e
+    INCRBY em {ctrl} para seus respectivos nós donos.
+    Faz retry com backoff em caso de falha para não perder resultados computados.
+    """
+    MAX_TENTATIVAS = 8
     while True:
-        ack_ids, results, label = out_queue.get()
-        try:
-            # A3: pipeline sem transaction
-            pipe = r.pipeline(transaction=False)
-            # Contador por frame_id para /render/progress (sem O(N) no xrevrange).
-            # Hash tag {stream} é OBRIGATÓRIA — se sair do slot, o pipeline quebra.
-            render_done_counts: dict = {}
-            for res in results:
-                # A7: maxlen=10_000
-                pipe.xadd(STREAM_RESULTS, res, maxlen=10_000, approximate=True)
-                if res.get("mode") == "render":
-                    fid = res.get("frame_id")
-                    if fid:
-                        render_done_counts[fid] = render_done_counts.get(fid, 0) + 1
-            for fid, n in render_done_counts.items():
-                pipe.incrby(f"{{stream}}:render:done:{fid}", n)
-            # Contador por-nó de tarefas processadas (usado pelo compositor
-            # para mostrar quanto cada nó trabalhou).
-            if results:
-                pipe.incrby(f"{{stream}}:stats:proc:{MY_NAME}", len(results))
-            pipe.xack(STREAM_TASKS, GROUP_NAME, *ack_ids)
-            pipe.execute()
-            if results:
-                log.info(f"processadas {len(results)} tarefas ({label})")
-        except Exception as e:
-            log.error(f"Erro na gravacao: {e}")
-            time.sleep(1)
+        item = out_queue.get()
+        shard_idx, ack_ids, results, label = item
+        task_key   = TASK_KEYS[shard_idx]
+        result_key = RESULT_KEYS[shard_idx]
+
+        for tentativa in range(1, MAX_TENTATIVAS + 1):
+            try:
+                pipe = r.pipeline(transaction=False)
+                render_done_counts: dict = {}
+                for res in results:
+                    pipe.xadd(result_key, res, maxlen=10_000, approximate=True)
+                    if res.get("mode") == "render":
+                        fid = res.get("frame_id")
+                        if fid:
+                            render_done_counts[fid] = render_done_counts.get(fid, 0) + 1
+                for fid, cnt in render_done_counts.items():
+                    pipe.incrby(ctrl_done_key(fid), cnt)
+                if results:
+                    pipe.incrby(ctrl_stats_key(MY_NAME), len(results))
+                pipe.xack(task_key, GROUP_NAME, *ack_ids)
+                pipe.execute()
+                if results:
+                    log.info(f"[s{shard_idx}] processadas {len(results)} tarefas ({label})")
+                break
+            except Exception as e:
+                espera = min(2 ** tentativa, 30)
+                if tentativa < MAX_TENTATIVAS:
+                    log.error(f"write_loop[s{shard_idx}] tentativa {tentativa}/{MAX_TENTATIVAS} "
+                              f"erro: {e} — retry em {espera}s")
+                    time.sleep(espera)
+                else:
+                    log.critical(f"write_loop[s{shard_idx}] falhou {MAX_TENTATIVAS}x, "
+                                 f"descartando {len(results)} resultados: {e}")
 
 
 def main():
     r = connect()
-    log.info(f"worker {CONSUMER} pronto, lendo de {STREAM_TASKS}")
+    log.info(f"worker {CONSUMER} pronto, lendo de {SHARDS} shards")
 
-    in_queue  = queue.Queue(maxsize=16)
-    out_queue = queue.Queue(maxsize=16)
+    in_queue  = queue.Queue(maxsize=64)
+    out_queue = queue.Queue(maxsize=64)
 
-    threading.Thread(target=fetch_loop, args=(r, CONSUMER, in_queue), daemon=True).start()
+    for i in range(SHARDS):
+        threading.Thread(target=fetch_loop,
+                         args=(r, CONSUMER, i, in_queue),
+                         daemon=True).start()
     threading.Thread(target=write_loop, args=(r, out_queue), daemon=True).start()
 
     while True:
         try:
-            messages = in_queue.get()
+            shard_idx, messages = in_queue.get()
 
-            # B4: separar tarefas de render das de geometry
             geo_msgs    = []
             render_msgs = []
             for msg_id, fields in messages:
@@ -108,18 +124,16 @@ def main():
                     geo_msgs.append((msg_id, fields))
 
             ack_ids  = []
-            ack_set  = set()   # lookup O(1)
+            ack_set  = set()
             results  = []
             geom_label = "geometry"
 
-            # ─── A4: processamento vetorizado de geometry ───
             if geo_msgs:
                 geom_label = geo_msgs[0][1].get("geom", "torus")
                 try:
                     batch_results = process_batch(geo_msgs)
                 except Exception as e:
                     log.error(f"process_batch falhou, caindo no fallback: {e}")
-                    # Fallback: loop Python ponto a ponto
                     batch_results = []
                     for msg_id, fields in geo_msgs:
                         pt = process_point(fields)
@@ -128,9 +142,6 @@ def main():
 
                 for msg_id, pt in batch_results:
                     results.append({
-                        # A7: campo "w" (ID completo do consumer), "worker" com MY_NAME
-                        # para compatibilidade com o frontend que agrupa por worker-XX
-                        # TODO: remover campo "worker" após atualizar frontend para usar "w"
                         "w":      CONSUMER,
                         "worker": MY_NAME,
                         "x":      pt["x"],
@@ -140,13 +151,11 @@ def main():
                     ack_ids.append(msg_id)
                     ack_set.add(msg_id)
 
-                # ACK de mensagens filtradas (mandelbulb escapado — sem resultado)
                 for msg_id, _fields in geo_msgs:
                     if msg_id not in ack_set:
                         ack_ids.append(msg_id)
                         ack_set.add(msg_id)
 
-            # ─── B4: processamento de render tiles ───
             if render_msgs:
                 geom_label = "render"
                 try:
@@ -164,7 +173,7 @@ def main():
                         ack_ids.append(msg_id)
 
             if ack_ids:
-                out_queue.put((ack_ids, results, geom_label))
+                out_queue.put((shard_idx, ack_ids, results, geom_label))
 
         except Exception as e:
             log.exception(f"erro inesperado: {e}")

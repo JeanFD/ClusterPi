@@ -2,15 +2,23 @@
 Raft daemon: roda em cada nó, mantém estado replicado e elege um líder.
 Só o líder chama gerar_tarefas(). Os outros viram workers passivos.
 
-A geometria ativa é lida da chave Redis {stream}:geometry
+A geometria ativa é lida da chave Redis {ctrl}:geometry
 (definida pelo frontend via API). Padrão: "torus".
 
-Modo de operação é lido da chave {stream}:mode
+Modo de operação é lido da chave {ctrl}:mode
 Valores: "geometry" (padrão) ou "render"
+
+Tasks são enfileiradas em round-robin nas 6 streams {s0}:tasks .. {s5}:tasks
+— cada uma em um master diferente, espalhando a carga pelos 6 nós.
 """
 import time, signal, sys, logging, json
 from pysyncobj import SyncObj, SyncObjConf, replicated
-from config import NODES, MY_IP, MY_NAME, RAFT_PORT
+from config import (
+    NODES, MY_IP, MY_NAME, RAFT_PORT,
+    SHARDS, TASK_KEYS, GROUP_NAME,
+    CTRL_MODE, CTRL_GEOM, CTRL_LEADER, CTRL_JOB, CTRL_CURR,
+    ctrl_done_key,
+)
 
 logging.basicConfig(
     level=logging.INFO,
@@ -34,9 +42,6 @@ class ClusterState(SyncObj):
         )
         super().__init__(self_addr, peers, cfg)
 
-    # A5: batch_id agora é contador local no líder — sem round-trip Raft por batch.
-    # Economiza ~30% do tráfego Raft. O ID reseta se o líder mudar, o que
-    # é aceitável: generate_batch usa o ID só como semente de índice.
     def stats(self) -> dict:
         return {}
 
@@ -49,7 +54,7 @@ def main():
 
     th = threading.Thread(
         target=recovery_run,
-        args=(state._isLeader,),  # passa o método como callback
+        args=(state._isLeader,),
         daemon=True,
     )
     th.start()
@@ -63,137 +68,157 @@ def main():
     from geometry import generate_batch, DEFAULT_GEOMETRY
     from render.tile_generator import generate_render_tasks
     from redis.cluster import RedisCluster
-    from config import STREAM_TASKS, GROUP_NAME
 
-    r = RedisCluster(host=MY_IP, port=6379, decode_responses=True)
+    r = RedisCluster(host=MY_IP, port=6379, decode_responses=True,
+                     socket_timeout=3.0, socket_connect_timeout=3.0)
 
-    # A5: total_tasks contado localmente — evita ~30% do tráfego Raft
     total_tasks = 0
 
-    # A2: parâmetros de produção tunados
-    # BATCH_SIZE menor + backpressure evita fila de milhões de tarefas
-    # O gargalo real é o throughput dos workers (~1K-5K pts/s por nó em numpy)
     BATCH_SIZE    = 2000
     INTERVAL_S    = 0.1
-    # Alvo de ~30k tarefas pendentes. Com 24 workers @ ~2k pts/s cada = 48k/s
-    # de consumo, 30k de headroom ≈ 600ms de buffer — saudável.
-    MAX_PENDENTES = 30_000
+    MAX_PENDENTES = 30_000   # total somado nas 6 shards
 
-    # Chave Redis onde o frontend define a geometria ativa
-    GEOM_KEY   = "{stream}:geometry"
-    MODE_KEY   = "{stream}:mode"
-    JOB_KEY    = "{stream}:render:job"
-    CURR_KEY   = "{stream}:render:current"
-
-    # A5: contador local de batch — sem round-trip Raft por batch
     batch_id = 0
-
-    # Controle de frame render: guarda o último frame_id enfileirado
     ultimo_frame_id = None
 
-    # Detecta primeira vez que este processo vira líder (para limpar streams)
-    ja_foi_lider = False
-    # Contador de erros Redis consecutivos — se muitos, sai e deixa systemd reiniciar
+    limpeza_feita = False   # True apenas durante o mandato atual; reseta ao perder liderança
+    era_lider     = False   # detecta transição líder→follower para resetar estado
     erros_redis = 0
-    MAX_ERROS_REDIS = 300  # ~15 segundos de falhas consecutivas (300 × 0.05s)
+    MAX_ERROS_REDIS = 300
+
+    def xpending_total() -> int:
+        total = 0
+        for k in TASK_KEYS:
+            try:
+                info = r.xpending(k, GROUP_NAME)
+                total += info.get("pending", 0) if info else 0
+            except Exception:
+                pass
+        return total
+
+    def clear_all_tasks():
+        for k in TASK_KEYS:
+            try:
+                r.xtrim(k, maxlen=0)
+            except Exception:
+                pass
 
     while True:
         try:
-            if state._isLeader():
-                r.set("{stream}:cluster:leader", MY_IP, ex=5)  # TTL 5s
-                erros_redis = 0  # Redis OK — zera contador
+            is_lider = state._isLeader()
 
-                # Na primeira vez que vira líder neste processo: limpa stream de tasks.
-                # Garante que entradas antigas (de antes do restart) não bloqueiam nada.
-                if not ja_foi_lider:
-                    ja_foi_lider = True
+            # ── Detecta perda de liderança: reseta estado do mandato ──────────
+            if not is_lider:
+                if era_lider:
+                    limpeza_feita   = False
+                    ultimo_frame_id = None
+                    era_lider       = False
+                    log.info(f"[{MY_NAME}] liderança perdida — estado do mandato resetado")
+                time.sleep(INTERVAL_S)
+                continue
+
+            # ── É líder ───────────────────────────────────────────────────────
+            r.set(CTRL_LEADER, MY_IP, ex=5)
+            era_lider   = True
+            erros_redis = 0
+
+            modo = r.get(CTRL_MODE) or "geometry"
+
+            if not limpeza_feita:
+                limpeza_feita = True
+                if modo != "render":
+                    # Em modo geometry: limpa streams para começar fresh
                     try:
-                        r.xtrim(STREAM_TASKS, maxlen=0)
-                        log.info(f"[{MY_NAME}] STREAM_TASKS limpa no startup como líder")
+                        clear_all_tasks()
+                        log.info(f"[{MY_NAME}] task streams limpas no startup como líder")
                     except Exception as e:
-                        log.warning(f"[{MY_NAME}] Falha ao limpar tasks no startup: {e}")
-
-                # B4: ler modo de operação a cada iteração
-                modo = r.get(MODE_KEY) or "geometry"
-
-                if modo == "geometry":
-                    # Backpressure: usa xpending (tarefas entregues mas não ACKed)
-                    # xlen inclui entradas já processadas/ACKed e cresce sem limite —
-                    # usar xpending evita que o daemon congele permanentemente.
+                        log.warning(f"[{MY_NAME}] Falha ao limpar tasks: {e}")
+                else:
+                    # Em modo render: mantém tiles em andamento; inicializa
+                    # ultimo_frame_id a partir do Redis para não re-despachar.
                     try:
-                        pend_info = r.xpending(STREAM_TASKS, GROUP_NAME)
-                        pendentes = pend_info.get("pending", 0) if pend_info else 0
-                    except Exception:
-                        pendentes = 0
+                        curr_json = r.get(CTRL_CURR)
+                        if curr_json:
+                            curr = json.loads(curr_json)
+                            ultimo_frame_id = curr.get("frame_id")
+                            log.info(f"[{MY_NAME}] render em andamento: frame "
+                                     f"{ultimo_frame_id} mantido")
+                    except Exception as e:
+                        log.warning(f"[{MY_NAME}] Falha ao ler CTRL_CURR: {e}")
 
-                    if pendentes > MAX_PENDENTES:
-                        time.sleep(0.05)
-                        continue
-                    # Modo original: gerar batch de pontos geométricos
-                    geom = r.get(GEOM_KEY) or DEFAULT_GEOMETRY
-
-                    batch_id += 1  # A5: contador local, sem round-trip Raft
-                    total_tasks += BATCH_SIZE
-
-                    points = generate_batch(geom, batch_id, BATCH_SIZE)
-
-                    # A3: pipeline sem transaction; maxlen mantém stream limitada
-                    pipe = r.pipeline(transaction=False)
-                    for p in points:
-                        pipe.xadd(STREAM_TASKS, p, maxlen=MAX_PENDENTES * 2, approximate=True)
-                    pipe.execute()
-
-                    log.info(f"[LIDER] batch {batch_id} → {BATCH_SIZE} tarefas ({geom}) total={total_tasks}")
-
-                elif modo == "render":
-                    # B4: modo render — enfileirar tiles de um frame
-                    job_json = r.get(JOB_KEY)
-                    if job_json:
-                        try:
-                            job = json.loads(job_json)
-                            frame_id = job.get("frame_id", "")
-
-                            # Só enfileira se for um frame novo
-                            if frame_id != ultimo_frame_id:
-                                # Resetar contador do frame anterior para não vazar memória
-                                if ultimo_frame_id:
-                                    try:
-                                        r.delete(f"{{stream}}:render:done:{ultimo_frame_id}")
-                                    except Exception:
-                                        pass
-                                tarefas = generate_render_tasks(
-                                    frame_id   = frame_id,
-                                    scene      = job.get("scene", "mandelbulb"),
-                                    camera     = job.get("camera", {}),
-                                    full_w     = int(job.get("full_w", 640)),
-                                    full_h     = int(job.get("full_h", 360)),
-                                    tile_size  = int(job.get("tile_size", 64)),
-                                    time_val   = float(job.get("time", 0.0)),
-                                )
-
-                                # Enfileirar todas as tarefas de uma vez
-                                pipe = r.pipeline(transaction=False)
-                                for t in tarefas:
-                                    pipe.xadd(STREAM_TASKS, t, maxlen=MAX_PENDENTES * 2, approximate=True)
-                                pipe.execute()
-
-                                total_tiles = len(tarefas)
-                                ultimo_frame_id = frame_id
-
-                                # Marcar frame como em progresso
-                                r.set(CURR_KEY, json.dumps({
-                                    "frame_id":    frame_id,
-                                    "tiles_total": total_tiles,
-                                    "scene":       job.get("scene", "mandelbulb"),
-                                }))
-
-                                log.info(f"[LIDER] render frame {frame_id} → {total_tiles} tiles enfileirados")
-                        except Exception as e:
-                            log.error(f"erro ao processar job render: {e}")
-
-                    # No modo render não gera continuamente — espera próximo job
-                    time.sleep(0.5)
+            if modo == "geometry":
+                pendentes = xpending_total()
+                if pendentes > MAX_PENDENTES:
+                    time.sleep(0.05)
                     continue
+
+                geom = r.get(CTRL_GEOM) or DEFAULT_GEOMETRY
+                batch_id += 1
+                total_tasks += BATCH_SIZE
+
+                points = generate_batch(geom, batch_id, BATCH_SIZE)
+
+                # Round-robin shards: cada ponto vai pra shard (batch_id+i)%SHARDS.
+                # Pipeline cross-slot: redis-py roteia cada XADD para o nó dono.
+                pipe = r.pipeline(transaction=False)
+                shard_max = (MAX_PENDENTES * 2) // SHARDS
+                for i, p in enumerate(points):
+                    shard = (batch_id + i) % SHARDS
+                    pipe.xadd(TASK_KEYS[shard], p,
+                              maxlen=shard_max, approximate=True)
+                pipe.execute()
+
+                log.info(f"[LIDER] batch {batch_id} → {BATCH_SIZE} tarefas ({geom}) "
+                         f"x{SHARDS} shards total={total_tasks}")
+
+            elif modo == "render":
+                job_json = r.get(CTRL_JOB)
+                if job_json:
+                    try:
+                        job = json.loads(job_json)
+                        frame_id = job.get("frame_id", "")
+
+                        if frame_id != ultimo_frame_id:
+                            if ultimo_frame_id:
+                                try:
+                                    r.delete(ctrl_done_key(ultimo_frame_id))
+                                except Exception:
+                                    pass
+                            tarefas = generate_render_tasks(
+                                frame_id   = frame_id,
+                                scene      = job.get("scene", "mandelbulb"),
+                                camera     = job.get("camera", {}),
+                                full_w     = int(job.get("full_w", 640)),
+                                full_h     = int(job.get("full_h", 360)),
+                                tile_size  = int(job.get("tile_size", 64)),
+                                time_val   = float(job.get("time", 0.0)),
+                            )
+
+                            # Distribuir tiles round-robin nas shards
+                            pipe = r.pipeline(transaction=False)
+                            shard_max = (MAX_PENDENTES * 2) // SHARDS
+                            for i, t in enumerate(tarefas):
+                                shard = i % SHARDS
+                                pipe.xadd(TASK_KEYS[shard], t,
+                                          maxlen=shard_max, approximate=True)
+                            pipe.execute()
+
+                            total_tiles = len(tarefas)
+                            ultimo_frame_id = frame_id
+
+                            r.set(CTRL_CURR, json.dumps({
+                                "frame_id":    frame_id,
+                                "tiles_total": total_tiles,
+                                "scene":       job.get("scene", "mandelbulb"),
+                            }))
+
+                            log.info(f"[LIDER] render frame {frame_id} → "
+                                     f"{total_tiles} tiles em {SHARDS} shards")
+                    except Exception as e:
+                        log.error(f"erro ao processar job render: {e}")
+
+                time.sleep(0.5)
+                continue
 
             time.sleep(INTERVAL_S)
         except Exception as e:

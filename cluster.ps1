@@ -266,7 +266,7 @@ function _Cluster-Shutdown {
 
     if (-not $Force) {
         Write-Host ""
-        Write-Host "ATENÇÃO: vai desligar $($Nodes.Count) Raspberry Pi." -ForegroundColor Yellow
+        Write-Host "ATENCAO: vai desligar $($Nodes.Count) Raspberry Pi." -ForegroundColor Yellow
         $confirm = Read-Host "Confirma? (sim/NAO)"
         if ($confirm -ne "sim") {
             Write-Host "Abortado." -ForegroundColor Yellow

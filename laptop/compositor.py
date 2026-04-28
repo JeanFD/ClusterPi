@@ -68,8 +68,14 @@ COL_X = {
 SCREEN_MARGIN_W = 80
 SCREEN_MARGIN_H = 160
 
-STREAM_RESULTS = "{stream}:results"
-CURR_KEY       = "{stream}:render:current"
+SHARDS       = 6
+TASK_KEYS    = [f"{{s{i}}}:tasks"   for i in range(SHARDS)]
+RESULT_KEYS  = [f"{{s{i}}}:results" for i in range(SHARDS)]
+GROUP_NAME   = "cluster-workers"
+CURR_KEY     = "{ctrl}:render:current"
+
+def _ctrl_stats_key(name: str) -> str:
+    return f"{{ctrl}}:stats:proc:{name}"
 
 
 # ═══════════════════════════════════════════════
@@ -92,9 +98,9 @@ def connect_redis(host, port: int):
     return RedisCluster(
         startup_nodes=startup,
         decode_responses=True,
-        socket_timeout=2.0,
-        socket_connect_timeout=1.5,
-        cluster_error_retry_attempts=5,
+        socket_timeout=1.5,
+        socket_connect_timeout=1.0,
+        cluster_error_retry_attempts=2,
     )
 
 
@@ -132,7 +138,8 @@ class CompositorSession:
     disp_w: int = 0        # tamanho exibido (possivelmente escalado)
     disp_h: int = 0
     scale:  float = 1.0
-    last_id: str = "0"
+    # last_id por shard (stream de results por shard)
+    last_ids: List[str] = field(default_factory=lambda: ["0"] * SHARDS)
     t_session_start: float = field(default_factory=time.time)
 
     # Stats polling
@@ -166,7 +173,7 @@ def _poll_stats_loop(sess: "CompositorSession") -> None:
     Thread de stats: para cada nó do cluster coleta
 
       - /health         → online, is_leader, temp (por-nó real)
-      - Redis GET       → {stream}:stats:proc:{node}  (feitos acumulados)
+      - Redis GET       → {ctrl}:stats:proc:{node}    (feitos acumulados)
       - XINFO CONSUMERS → pending por-consumer (somado por nó)
 
     Computa rate (feitos/s) via diferença entre polls. Tudo por-nó —
@@ -180,9 +187,6 @@ def _poll_stats_loop(sess: "CompositorSession") -> None:
     ema_rate:   Dict[str, float] = {}
     ema_flight: Dict[str, float] = {}
     EMA_ALPHA = 0.25
-
-    STREAM_TASKS = "{stream}:tasks"
-    GROUP_NAME   = "cluster-workers"
 
     while not sess.stop_flag.is_set():
         # 1) /health em paralelo (serial é 6×0.8s = 4.8s no pior caso, serial
@@ -200,27 +204,28 @@ def _poll_stats_loop(sess: "CompositorSession") -> None:
             except Exception:
                 health[name] = {"online": False, "leader": False, "temp": None}
 
-        # 2) feitos por-nó (contador incrementado em worker.py)
+        # 2) feitos por-nó (contador {ctrl}:stats:proc:<node> incrementado em worker.py)
         proc_by_node: Dict[str, int] = {n["name"]: 0 for n in NODES_INFO}
         try:
             for node in NODES_INFO:
-                v = sess.r.get(f"{{stream}}:stats:proc:{node['name']}")
+                v = sess.r.get(_ctrl_stats_key(node["name"]))
                 proc_by_node[node["name"]] = int(v or 0)
         except Exception:
             pass
 
-        # 3) em voo por-nó via XINFO CONSUMERS (somando workers-w0..w3)
+        # 3) em voo por-nó via XINFO CONSUMERS em cada uma das 6 shards
+        #    (soma workers-XX-w0..w3 em todas as shards)
         in_flight_by_node: Dict[str, int] = {n["name"]: 0 for n in NODES_INFO}
-        try:
-            consumers = sess.r.xinfo_consumers(STREAM_TASKS, GROUP_NAME)
-            for c in consumers:
-                cname = c.get("name", "")
-                # cname = "worker-01-w0" → base = "worker-01"
-                base = "-".join(cname.split("-")[:2])
-                if base in in_flight_by_node:
-                    in_flight_by_node[base] += int(c.get("pending", 0) or 0)
-        except Exception:
-            pass
+        for task_key in TASK_KEYS:
+            try:
+                consumers = sess.r.xinfo_consumers(task_key, GROUP_NAME)
+                for c in consumers:
+                    cname = c.get("name", "")
+                    base = "-".join(cname.split("-")[:2])
+                    if base in in_flight_by_node:
+                        in_flight_by_node[base] += int(c.get("pending", 0) or 0)
+            except Exception:
+                continue
 
         # 4) calcular rate bruto + suavizar com EMA + montar snapshot
         now = time.time()
@@ -461,11 +466,43 @@ def render_one_frame(
     Reutiliza a janela e o last_id da sessão; avança last_id conforme lê
     a stream, então entre frames não relê tudo.
     """
+    import queue as _queue
     r = sess.r
     full_w, full_h = sess.full_w, sess.full_h
     canvas = np.zeros((full_h, full_w, 3), dtype=np.uint8)
     overlays: Dict[Tuple[int, int], Tuple[Tuple[int, int, int], float, int, int]] = {}
     tiles_done: set = set()
+
+    # 6 threads pullers: cada uma lê sua shard de results e empurra (msg_id, fields, shard_idx)
+    tile_queue: _queue.Queue = _queue.Queue(maxsize=256)
+    stop_pullers = threading.Event()
+
+    def _puller(shard_idx: int):
+        rkey = RESULT_KEYS[shard_idx]
+        while not stop_pullers.is_set():
+            try:
+                resp = sess.r.xread({rkey: sess.last_ids[shard_idx]},
+                                    count=50, block=150)
+            except Exception as e:
+                print(f"[compositor] puller[s{shard_idx}] erro: {e}")
+                try:
+                    sess.r = connect_redis([n["ip"] for n in NODES_INFO], 6379)
+                except Exception:
+                    pass
+                time.sleep(0.3)
+                continue
+            if not resp:
+                continue
+            _name, msgs = resp[0]
+            for msg_id, fields in msgs:
+                sess.last_ids[shard_idx] = msg_id
+                tile_queue.put((msg_id, fields, shard_idx))
+
+    puller_threads = []
+    for i in range(SHARDS):
+        th = threading.Thread(target=_puller, args=(i,), daemon=True)
+        th.start()
+        puller_threads.append(th)
 
     # Descobrir tiles_total do frame
     tiles_total = tiles_total_hint
@@ -504,50 +541,42 @@ def render_one_frame(
             if aborted:
                 break
 
-        # Ler tiles da stream, avançando o last_id da sessão.
-        # block=150 mantém pygame responsivo (<200ms sem pump de eventos).
-        try:
-            resp = r.xread({STREAM_RESULTS: sess.last_id}, count=100, block=150)
-        except Exception as e:
-            print(f"[compositor] Redis erro (reconectando): {e}")
-            # Recria o cliente — topologia pode ter mudado com o failover.
+        # Drena o queue de tiles produzido pelos 6 pullers (até ~100 por ciclo).
+        drained = 0
+        while drained < 100:
             try:
-                sess.r = connect_redis([n["ip"] for n in NODES_INFO], 6379)
-                r = sess.r
-            except Exception as e2:
-                print(f"[compositor] reconexão falhou: {e2}")
-            time.sleep(0.3)
-            continue
+                msg_id, fields, _shard = tile_queue.get(timeout=0.15 if drained == 0 else 0.0)
+            except _queue.Empty:
+                break
+            drained += 1
+            if fields.get("mode") != "render":
+                continue
+            if fields.get("frame_id") != frame_id:
+                continue
 
-        if resp:
-            _stream, msgs = resp[0]
-            for msg_id, fields in msgs:
-                sess.last_id = msg_id
-                if fields.get("mode") != "render":
-                    continue
-                if fields.get("frame_id") != frame_id:
-                    continue
-
+            try:
                 tx = int(fields["tile_x"])
                 ty = int(fields["tile_y"])
                 tw = int(fields["tile_w"])
                 th = int(fields["tile_h"])
-                key = (tx, ty)
-                if key in tiles_done:
-                    continue
+            except Exception:
+                continue
+            key = (tx, ty)
+            if key in tiles_done:
+                continue
 
-                try:
-                    tile_arr = decode_tile(fields["png_b64"])
-                    canvas[ty:ty+th, tx:tx+tw] = tile_arr
+            try:
+                tile_arr = decode_tile(fields["png_b64"])
+                canvas[ty:ty+th, tx:tx+tw] = tile_arr
 
-                    w_name    = fields.get("w", fields.get("worker", ""))
-                    base_name = worker_base_name(w_name)
-                    color     = WORKER_COLORS.get(base_name, DEFAULT_WORKER_COLOR)
-                    overlays[key] = (color, time.time(), tw, th)
-                    tiles_done.add(key)
-                    throughput_count += 1
-                except Exception as e:
-                    print(f"[compositor] erro decod tile ({tx},{ty}): {e}")
+                w_name    = fields.get("w", fields.get("worker", ""))
+                base_name = worker_base_name(w_name)
+                color     = WORKER_COLORS.get(base_name, DEFAULT_WORKER_COLOR)
+                overlays[key] = (color, time.time(), tw, th)
+                tiles_done.add(key)
+                throughput_count += 1
+            except Exception as e:
+                print(f"[compositor] erro decod tile ({tx},{ty}): {e}")
 
         # Throughput
         now = time.time()
@@ -587,6 +616,11 @@ def render_one_frame(
 
         if tiles_total > 0 and len(tiles_done) >= tiles_total:
             break
+
+    # Encerra threads de puller antes de sair
+    stop_pullers.set()
+    for th in puller_threads:
+        th.join(timeout=0.5)
 
     if aborted:
         return False
